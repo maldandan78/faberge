@@ -1,0 +1,41 @@
+# Локальный стенд: PostgreSQL 17 (зеркало Yandex Managed PG) + FastAPI.
+#   docker compose up --build
+#   -> API:        http://localhost:8000/docs
+#   -> PostgreSQL: localhost:5432 (faberge/faberge)
+#
+# Схема и демо-данные применяются автоматически при первой инициализации БД
+# (скрипты из /docker-entrypoint-initdb.d выполняются только на пустом томе).
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: faberge
+      POSTGRES_PASSWORD: faberge
+      POSTGRES_DB: faberge
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U faberge -d faberge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://faberge:faberge@db:5432/faberge
+      PUBLIC_BASE_URL: http://localhost:8000
+      CORS_ORIGINS: "*"
+      ADMIN_API_TOKEN: dev-admin-token
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

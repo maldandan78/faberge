@@ -1,0 +1,2164 @@
+openapi: 3.0.3
+
+info:
+  title: API ИИ-гида музея Фаберже
+  version: 0.1.0-mvp
+  description: |
+    Backend-API мобильного web-приложения (PWA) «ИИ-гид музея Фаберже».
+
+    Посетитель сканирует **QR-код** на входе экспозиции, попадает в приложение
+    без регистрации и установки, перемещается по **интерактивной карте**
+    (зал → витрина → экспонат), а главное — может **сфотографировать экспонат**,
+    получить о нём рассказ от ИИ-гида и **прослушать** его озвучку.
+
+    Этот документ описывает контракт backend-сервиса (FastAPI на Yandex Cloud),
+    к которому обращается фронтенд. Спецификация написана по дорожной карте MVP
+    (25 мая – 25 июня) и служит единым контрактом между Frontend, Backend и ML.
+
+    ## Ключевой пользовательский сценарий (бесшовное распознавание)
+
+    ```
+    Клик «Распознать экспонат»
+      → камера (WebRTC)
+      → снимок
+      → POST /recognition (фото → YOLO → label_slug)
+      → POST /guide/story (label_slug → raw_history из БД → YandexGPT → рассказ)
+      → показ рассказа + 3–4 всплывающих вопроса
+      → POST /speech («Прослушать», SpeechKit → аудио)
+      → блок «Другие экспонаты зала» (GET /exhibits/{id}/related)
+    ```
+
+    ## Доменная модель
+
+    Иерархия каталога повторяет физическую структуру музея:
+
+    | Уровень   | Сущность   | Таблица БД   | Ключевые поля                                   |
+    |-----------|------------|--------------|-------------------------------------------------|
+    | 1         | Зал        | `halls`      | `hall_number`, `name`, описание                 |
+    | 2         | Витрина    | `showcases`  | `hall_id`, `showcase_number`                    |
+    | 3         | Экспонат   | `exhibits`   | `label_slug`, `name`, `year_created`, `master_name`, `material`, `short_description`, `raw_history` |
+
+    `label_slug` — стабильный идентификатор класса, который возвращает модель YOLO
+    (например, `faberge_egg_winter`). По нему ML-пайплайн и LLM связывают фото
+    с записью в БД. `raw_history` — внутренние факты для генерации рассказа
+    (через публичный API не отдаётся).
+
+    ## Технологический стек (Yandex Cloud)
+
+    | Слой              | Технология                                  |
+    |-------------------|---------------------------------------------|
+    | API / backend     | Python + FastAPI, Yandex API Gateway        |
+    | База данных       | Yandex Managed Service for PostgreSQL       |
+    | Хранилище медиа   | Yandex Object Storage + Cloud CDN           |
+    | Бизнес-логика ML  | Yandex Cloud Functions                      |
+    | Детекция по фото  | YOLO (обучение — Datasphere, деплой — Cloud)|
+    | Генерация текста  | YandexGPT                                    |
+    | Синтез речи       | Yandex SpeechKit                            |
+    | 3D-модели         | Koinovo (embed) + Three.js/WebGL на фронте  |
+
+    ## Группы эндпоинтов
+
+    - **Система** — health-check для API Gateway и мониторинга.
+    - **Карта и навигация** — интерактивная карта и уровни зал → витрина → экспонат.
+    - **Экспонаты** — карточка экспоната и блок «Другие экспонаты зала».
+    - **Поиск** — поисковая строка по названиям залов и экспонатов.
+    - **Распознавание** — приём фото и маршрутизация в YOLO.
+    - **ИИ-гид** — генерация рассказа (YandexGPT) и диалог с подсказками.
+    - **Озвучивание** — синтез речи (SpeechKit) для кнопки «Прослушать».
+    - **Администрирование** *(вне MVP)* — CRUD экспонатов и аналитика.
+    - **Телеметрия** *(вне MVP)* — сбор событий для аналитики.
+
+    ## Аутентификация
+
+    Публичные эндпоинты (всё, что нужно посетителю) **открыты** — приложение
+    работает по QR без регистрации. Эндпоинты `/admin/**` защищены
+    **Bearer-токеном** (`bearerAuth`) и относятся к этапу «вне MVP».
+
+    ## Формат ошибок
+
+    Сервис следует конвенции FastAPI: ошибки уровня приложения возвращаются как
+    `{ "detail": "..." }`, ошибки валидации запроса — `422` с массивом
+    `detail[]` (`HTTPValidationError`). Сбои внешних сервисов (YOLO / YandexGPT /
+    SpeechKit) отдаются как `502` (`UpstreamError`).
+
+    ## Источники данных для наполнения БД
+
+    - План экспозиции с картой залов: https://fabergemuseum.ru/posetitelyam/plan-ekspozitsii
+    - Путеводитель (PDF, полное описание залов и экспонатов): http://fabergemuseum.ru/image/pdf/faberge_expo.pdf
+    - Шедевры коллекции (фото + подробное описание): https://fabergemuseum.ru/kollekczii/shedevryi-kollekczii/
+    - 3D-модели экспонатов (Koinovo): https://koinovo.ru/fabergemuseum
+
+    > Условные обозначения: операции, помеченные тегом **«вне MVP»**, не входят в
+    > спринт 25 мая – 25 июня и описаны для целостности контракта.
+  x-version-note: MVP-контракт, может меняться по ходу спринта.
+  contact:
+    name: Команда ИИ-гида музея Фаберже
+    url: https://fabergemuseum.ru
+  license:
+    name: Proprietary — внутренний документ проекта
+    url: https://fabergemuseum.ru
+
+externalDocs:
+  description: Шедевры коллекции (эталон наполнения карточки экспоната)
+  url: https://fabergemuseum.ru/kollekczii/shedevryi-kollekczii/
+
+servers:
+  - url: https://{gatewayId}.apigw.yandexcloud.net
+    description: Production — Yandex API Gateway
+    variables:
+      gatewayId:
+        default: d5dexampleexample00
+        description: Идентификатор развёрнутого Yandex API Gateway
+  - url: http://localhost:8000
+    description: Локальная разработка (FastAPI + uvicorn)
+  - url: http://localhost:8080
+    description: Локальный мок (Swagger UI / Prism)
+
+tags:
+  - name: Система
+    description: Служебные эндпоинты — health-check и мониторинг.
+  - name: Карта и навигация
+    description: >-
+      Интерактивная карта музея и навигация по уровням
+      зал → витрина → экспонат.
+  - name: Экспонаты
+    description: >-
+      Данные карточки экспоната (фото, 3D, год, мастер, материалы)
+      и блок «Другие экспонаты зала».
+  - name: Поиск
+    description: Поисковая строка по названиям залов и экспонатов.
+  - name: Распознавание
+    description: >-
+      Приём фото от фронтенда и маршрутизация запроса к модели YOLO
+      (этап 8–22 июня).
+  - name: ИИ-гид
+    description: >-
+      Генерация рассказа об экспонате (YandexGPT) и диалог с
+      контекстными вопросами-подсказками.
+  - name: Озвучивание
+    description: Синтез речи (Yandex SpeechKit) для кнопки «Прослушать».
+  - name: Администрирование
+    description: '[Вне MVP] CRUD экспонатов и административная аналитика.'
+  - name: Телеметрия
+    description: '[Вне MVP] Приём пользовательских событий для аналитики.'
+
+x-tagGroups:
+  - name: MVP (25 мая – 25 июня)
+    tags:
+      - Система
+      - Карта и навигация
+      - Экспонаты
+      - Поиск
+      - Распознавание
+      - ИИ-гид
+      - Озвучивание
+  - name: Дальнейшие шаги (вне MVP)
+    tags:
+      - Администрирование
+      - Телеметрия
+
+# По умолчанию эндпоинты публичные; admin переопределяет на уровне операции.
+security: []
+
+paths:
+  # ─────────────────────────────── Система ───────────────────────────────
+  /health:
+    get:
+      tags: [Система]
+      summary: Health-check
+      description: >-
+        Проверка живости сервиса и доступности внешних зависимостей
+        (PostgreSQL, Object Storage, YOLO, YandexGPT, SpeechKit).
+        Используется API Gateway и системой мониторинга.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Сервис работает.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: Сервис деградирован — недоступна критичная зависимость.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  # ──────────────────────── Карта и навигация ────────────────────────────
+  /map:
+    get:
+      tags: [Карта и навигация]
+      summary: Интерактивная карта музея
+      description: >-
+        Полное дерево экспозиции для отрисовки интерактивной карты:
+        залы с вложенными витринами и счётчиками экспонатов.
+        Один запрос на загрузку карты на первом экране.
+      operationId: getMap
+      security: []
+      responses:
+        '200':
+          description: Дерево залов и витрин.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MapResponse'
+
+  /halls:
+    get:
+      tags: [Карта и навигация]
+      summary: Список залов
+      description: Постраничный список залов музея для карты и навигации.
+      operationId: listHalls
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список залов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HallListResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /halls/{hall_id}:
+    get:
+      tags: [Карта и навигация]
+      summary: Получить зал
+      description: >-
+        Карточка зала с описанием и кнопкой «Спросить AI-гида» на фронте.
+        Описание зала используется на уровне зала интерактивной карты.
+      operationId: getHall
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/HallId'
+      responses:
+        '200':
+          description: Данные зала.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HallDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /halls/{hall_id}/showcases:
+    get:
+      tags: [Карта и навигация]
+      summary: Витрины зала
+      description: Список витрин внутри указанного зала.
+      operationId: listHallShowcases
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/HallId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список витрин зала.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowcaseListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /halls/{hall_id}/exhibits:
+    get:
+      tags: [Карта и навигация]
+      summary: Экспонаты зала
+      description: >-
+        Все экспонаты зала (по всем его витринам). Эта же выборка лежит в
+        основе блока «Другие экспонаты зала» — соседние записи по `hall_id`.
+      operationId: listHallExhibits
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/HallId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список экспонатов зала.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /showcases/{showcase_id}:
+    get:
+      tags: [Карта и навигация]
+      summary: Получить витрину
+      operationId: getShowcase
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShowcaseId'
+      responses:
+        '200':
+          description: Данные витрины.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowcaseDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /showcases/{showcase_id}/exhibits:
+    get:
+      tags: [Карта и навигация]
+      summary: Экспонаты витрины
+      operationId: listShowcaseExhibits
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ShowcaseId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Список экспонатов витрины.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  # ─────────────────────────── Экспонаты ─────────────────────────────────
+  /exhibits:
+    get:
+      tags: [Экспонаты]
+      summary: Список / фильтрация экспонатов
+      description: >-
+        Постраничный список экспонатов с фильтрами по залу, витрине,
+        `label_slug` и подстроке названия. Универсальная выборка для каталога.
+      operationId: listExhibits
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: hall_id
+          in: query
+          description: Фильтр по идентификатору зала.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          example: 5
+        - name: showcase_id
+          in: query
+          description: Фильтр по идентификатору витрины.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+        - name: label_slug
+          in: query
+          description: Фильтр по точному `label_slug` (то, что возвращает YOLO).
+          required: false
+          schema:
+            type: string
+          example: faberge_egg_coronation
+        - name: q
+          in: query
+          description: Поиск по подстроке названия экспоната.
+          required: false
+          schema:
+            type: string
+          example: яйцо
+      responses:
+        '200':
+          description: Список экспонатов.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitListResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /exhibits/{exhibit_id}:
+    get:
+      tags: [Экспонаты]
+      summary: Карточка экспоната
+      description: >-
+        Полные данные карточки: фото, 3D-модель (Koinovo), краткое описание
+        (год, мастер, материалы), ссылки на зал и витрину. Поле `raw_history`
+        в публичный ответ не включается.
+      operationId: getExhibit
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      responses:
+        '200':
+          description: Карточка экспоната.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exhibit'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /exhibits/by-slug/{label_slug}:
+    get:
+      tags: [Экспонаты]
+      summary: Экспонат по label_slug
+      description: >-
+        Получение карточки по `label_slug` — удобно сразу после распознавания,
+        когда YOLO вернул класс, но `exhibit_id` ещё неизвестен фронтенду.
+      operationId: getExhibitBySlug
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/LabelSlug'
+      responses:
+        '200':
+          description: Карточка экспоната.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exhibit'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /exhibits/{exhibit_id}/related:
+    get:
+      tags: [Экспонаты]
+      summary: Другие экспонаты зала
+      description: >-
+        Соседние экспонаты того же зала (по `hall_id`), исключая текущий.
+        Питает блок «Другие экспонаты зала» внизу карточки — карусель/сетку
+        кликабельных фото для удержания посетителя в каталоге.
+      operationId: listRelatedExhibits
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+        - name: limit
+          in: query
+          description: Сколько соседних экспонатов вернуть.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 12
+      responses:
+        '200':
+          description: Соседние экспонаты зала.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  # ───────────────────────────── Поиск ───────────────────────────────────
+  /search:
+    get:
+      tags: [Поиск]
+      summary: Поиск по залам и экспонатам
+      description: >-
+        Поисковая строка интерактивной карты: ищет совпадения в названиях
+        залов и экспонатов. Возвращает две раздельные коллекции результатов.
+      operationId: search
+      security: []
+      parameters:
+        - name: q
+          in: query
+          description: Поисковый запрос (название зала или экспоната).
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          example: коронационное
+        - name: limit
+          in: query
+          description: Максимум результатов в каждой коллекции.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: Результаты поиска.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  # ─────────────────────────── Распознавание ─────────────────────────────
+  /recognition:
+    post:
+      tags: [Распознавание]
+      summary: Распознать экспонат по фото
+      description: |
+        Принимает фотографию экспоната, отправляет её в развёрнутую на
+        Yandex Cloud модель **YOLO** и возвращает распознанный `label_slug`
+        вместе с найденной в БД карточкой экспоната.
+
+        Сразу после снимка фронтенд бесшовно переходит в окно чата с
+        состоянием загрузки и вызывает этот эндпоинт. При успешном
+        распознавании далее обычно вызывается `POST /guide/story`.
+
+        Если уверенность ниже порога — `recognized = false`; в `candidates`
+        могут вернуться наиболее вероятные классы для уточнения.
+      operationId: recognizeExhibit
+      security: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Фото экспоната (JPEG/PNG/WebP, до 10 МБ).
+                hall_id:
+                  type: integer
+                  minimum: 1
+                  description: >-
+                    Необязательная подсказка о текущем зале (по карте) —
+                    повышает точность и сужает поиск.
+                top_k:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 3
+                  description: Сколько кандидатов вернуть при неуверенном распознавании.
+            encoding:
+              file:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '200':
+          description: Результат распознавания (успех или «не распознано»).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecognitionResponse'
+              examples:
+                recognized:
+                  summary: Экспонат распознан
+                  value:
+                    recognized: true
+                    label_slug: faberge_egg_coronation
+                    confidence: 0.94
+                    request_id: 7b1c0e2a-9f3d-4a2b-8c10-2a4d6e8f0a11
+                    processing_ms: 312
+                    exhibit:
+                      id: 101
+                      label_slug: faberge_egg_coronation
+                      name: Яйцо «Коронационное»
+                      year_created: 1897
+                      master_name: Михаил Перхин
+                      material: Золото, гильоше-эмаль, бриллианты, рубины
+                      short_description: >-
+                        Пасхальное яйцо-сюрприз, подаренное Николаем II
+                        императрице Александре Фёдоровне в память о коронации.
+                      image_url: https://cdn.example.cloud/exhibits/coronation/main.jpg
+                      model_3d_url: https://koinovo.ru/fabergemuseum/coronation
+                      hall:
+                        id: 5
+                        hall_number: 5
+                        name: Синяя гостиная
+                      showcase:
+                        id: 12
+                        showcase_number: 3
+                    candidates: []
+                not_recognized:
+                  summary: Не распознано — есть кандидаты
+                  value:
+                    recognized: false
+                    label_slug: null
+                    confidence: 0.41
+                    request_id: 0c5b2a18-3e7f-4d9a-9b21-7c3e1f5a2b00
+                    processing_ms: 287
+                    exhibit: null
+                    candidates:
+                      - label_slug: faberge_egg_winter
+                        name: Яйцо «Зимнее»
+                        confidence: 0.41
+                      - label_slug: faberge_egg_lilies
+                        name: Яйцо «Ландыши»
+                        confidence: 0.33
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+
+  # ───────────────────────────── ИИ-гид ──────────────────────────────────
+  /guide/story:
+    post:
+      tags: [ИИ-гид]
+      summary: Сгенерировать рассказ об экспонате
+      description: |
+        Cloud Function берёт `raw_history` экспоната из БД и формирует промпт
+        для **YandexGPT**:
+
+        > «Напиши интересную историю для посетителя музея, используя данные:
+        > `{raw_history}`, стиль: `{style}`, год: `{year_created}`.»
+
+        Возвращает связный рассказ и **3–4 контекстных вопроса-подсказки**
+        (всплывающие подсказки внизу чата для продолжения диалога). По флагу
+        `include_audio` сразу прикладывает ссылку на озвучку (SpeechKit).
+
+        Укажите **`exhibit_id` или `label_slug`** (хотя бы одно). `label_slug`
+        удобен сразу после распознавания.
+      operationId: generateStory
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StoryRequest'
+            examples:
+              afterRecognition:
+                summary: После распознавания (по label_slug)
+                value:
+                  label_slug: faberge_egg_coronation
+                  style: engaging
+                  language: ru
+                  include_audio: false
+                  max_questions: 4
+      responses:
+        '200':
+          description: Сгенерированный рассказ и подсказки.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StoryResponse'
+              examples:
+                story:
+                  summary: Рассказ о Коронационном яйце
+                  value:
+                    exhibit_id: 101
+                    label_slug: faberge_egg_coronation
+                    style: engaging
+                    text: >-
+                      В 1897 году Карл Фаберже исполнил для Николая II особый
+                      пасхальный подарок императрице Александре Фёдоровне…
+                    suggested_questions:
+                      - Сколько времени ушло на создание?
+                      - Кому подарили это яйцо?
+                      - Что за сюрприз спрятан внутри?
+                      - Какие материалы использовал мастер?
+                    audio_url: null
+                    model: yandexgpt/latest
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+
+  /guide/chat:
+    post:
+      tags: [ИИ-гид]
+      summary: Диалог с ИИ-гидом
+      description: |
+        Многоходовой диалог с гидом. Контекст задаётся экспонатом
+        (`exhibit_id`/`label_slug`) либо залом (`hall_id` — для кнопки
+        «Спросить AI-гида» на уровне зала). Часто `message` — это один из
+        ранее предложенных `suggested_questions`.
+
+        Состояние диалога хранится по `session_id`: если он не передан, сервер
+        создаёт новый и возвращает его. Альтернативно можно передавать
+        историю сообщений в `history`. Ответ снова содержит набор
+        контекстных вопросов-подсказок.
+      operationId: chatWithGuide
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            examples:
+              followUp:
+                summary: Уточняющий вопрос по экспонату
+                value:
+                  session_id: 2f6a9b3c-1d4e-4f8a-9c2b-5e7a1d0c3b66
+                  context:
+                    exhibit_id: 101
+                  message: Кому подарили это яйцо?
+      responses:
+        '200':
+          description: Ответ гида и новые подсказки.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+              examples:
+                answer:
+                  summary: Ответ на уточняющий вопрос
+                  value:
+                    session_id: 2f6a9b3c-1d4e-4f8a-9c2b-5e7a1d0c3b66
+                    answer: >-
+                      Это яйцо Николай II подарил своей супруге, императрице
+                      Александре Фёдоровне, на Пасху 1897 года…
+                    suggested_questions:
+                      - А что подарили его матери?
+                      - Где оно хранилось после революции?
+                      - Сколько таких яиц всего создал Фаберже?
+                    context:
+                      exhibit_id: 101
+                      label_slug: faberge_egg_coronation
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+
+  # ──────────────────────────── Озвучивание ──────────────────────────────
+  /speech:
+    post:
+      tags: [Озвучивание]
+      summary: Синтез речи (Прослушать)
+      description: |
+        Озвучивает текст через **Yandex SpeechKit** для кнопки «Прослушать».
+        Принимает либо произвольный `text`, либо `exhibit_id` (тогда озвучивается
+        краткое описание экспоната). Возвращает ссылку на аудио в Object Storage
+        (раздаётся через CDN); часто используемые описания кэшируются.
+
+        Кнопка «Прослушать» на фронте имеет состояния **Play / Pause / Loading** —
+        `Loading` соответствует ожиданию ответа этого эндпоинта.
+      operationId: synthesizeSpeech
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechRequest'
+            examples:
+              byText:
+                summary: Озвучить произвольный текст
+                value:
+                  text: В 1897 году Карл Фаберже исполнил Коронационное яйцо…
+                  voice: alena
+                  format: mp3
+                  speed: 1.0
+              byExhibit:
+                summary: Озвучить описание экспоната
+                value:
+                  exhibit_id: 101
+                  voice: filipp
+                  format: oggopus
+      responses:
+        '200':
+          description: Ссылка на синтезированное аудио.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpeechResponse'
+              examples:
+                ok:
+                  summary: Готовое аудио
+                  value:
+                    audio_url: https://cdn.example.cloud/tts/coronation_alena.mp3
+                    format: mp3
+                    voice: alena
+                    duration_ms: 21400
+                    characters: 248
+                    cached: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+
+  # ─────────────────────── Администрирование [вне MVP] ───────────────────
+  /admin/halls:
+    post:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Создать зал'
+      operationId: createHall
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HallCreate'
+      responses:
+        '201':
+          description: Зал создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HallDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /admin/showcases:
+    post:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Создать витрину'
+      operationId: createShowcase
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShowcaseCreate'
+      responses:
+        '201':
+          description: Витрина создана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowcaseDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /admin/exhibits:
+    post:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Создать экспонат'
+      description: >-
+        Создание экспоната, включая внутреннее поле `raw_history`
+        (факты для генерации рассказа LLM).
+      operationId: createExhibit
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExhibitCreate'
+            examples:
+              winterEgg:
+                summary: Зимнее яйцо с raw_history
+                value:
+                  showcase_id: 12
+                  label_slug: faberge_egg_winter
+                  name: Яйцо «Зимнее»
+                  year_created: 1913
+                  master_name: Альма Пиль
+                  material: Горный хрусталь, платина, бриллианты
+                  short_description: >-
+                    Пасхальное яйцо в виде ледяного кристалла с сюрпризом-корзиной
+                    подснежников.
+                  raw_history: >-
+                    Заказчик — Николай II. Подарок императрице Марии Фёдоровне.
+                    Дизайн — Альма Пиль. Использованы горный хрусталь и бриллианты,
+                    имитирующие иней. Сюрприз — корзина подснежников.
+      responses:
+        '201':
+          description: Экспонат создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitAdmin'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /admin/exhibits/{exhibit_id}:
+    put:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Полностью обновить экспонат'
+      operationId: updateExhibit
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExhibitUpdate'
+      responses:
+        '200':
+          description: Экспонат обновлён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitAdmin'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+    patch:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Частично обновить экспонат'
+      operationId: patchExhibit
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExhibitPatch'
+      responses:
+        '200':
+          description: Экспонат обновлён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitAdmin'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+    delete:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Удалить экспонат'
+      operationId: deleteExhibit
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      responses:
+        '204':
+          description: Экспонат удалён.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/exhibits/{exhibit_id}/media:
+    post:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Загрузить фото экспоната'
+      description: >-
+        Загрузка изображения экспоната в Yandex Object Storage; возвращает
+        публичные URL (оригинал + превью), раздаваемые через CDN.
+      operationId: uploadExhibitMedia
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Изображение (JPEG/PNG/WebP).
+                is_primary:
+                  type: boolean
+                  default: false
+                  description: Сделать это изображение главным в карточке.
+      responses:
+        '201':
+          description: Файл загружен.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaUploadResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+
+  /admin/analytics/overview:
+    get:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Сводная аналитика'
+      description: >-
+        Агрегированные показатели использования за период: сессии,
+        распознавания, доля успешных распознаваний, сообщения в чате,
+        прослушивания аудио, топ экспонатов и залов.
+      operationId: getAnalyticsOverview
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          description: Начало периода (ISO-8601 дата).
+          required: false
+          schema:
+            type: string
+            format: date
+          example: '2026-05-25'
+        - name: to
+          in: query
+          description: Конец периода (ISO-8601 дата).
+          required: false
+          schema:
+            type: string
+            format: date
+          example: '2026-06-25'
+      responses:
+        '200':
+          description: Сводные показатели.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsOverview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  # ───────────────────────── Телеметрия [вне MVP] ────────────────────────
+  /telemetry/events:
+    post:
+      tags: [Телеметрия]
+      summary: '[Вне MVP] Отправить события'
+      description: >-
+        Пакетный приём анонимных пользовательских событий (просмотр экспоната,
+        распознавание, сообщение в чате, прослушивание) — источник данных для
+        административной аналитики.
+      operationId: ingestEvents
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventBatch'
+      responses:
+        '202':
+          description: События приняты в обработку.
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer-токен администратора. Только для эндпоинтов `/admin/**`.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Максимум элементов на странице.
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      description: Смещение от начала выборки (постраничность).
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    HallId:
+      name: hall_id
+      in: path
+      required: true
+      description: Идентификатор зала.
+      schema:
+        type: integer
+        minimum: 1
+      example: 5
+    ShowcaseId:
+      name: showcase_id
+      in: path
+      required: true
+      description: Идентификатор витрины.
+      schema:
+        type: integer
+        minimum: 1
+      example: 12
+    ExhibitId:
+      name: exhibit_id
+      in: path
+      required: true
+      description: Идентификатор экспоната.
+      schema:
+        type: integer
+        minimum: 1
+      example: 101
+    LabelSlug:
+      name: label_slug
+      in: path
+      required: true
+      description: Стабильный slug класса от YOLO.
+      schema:
+        type: string
+        pattern: '^[a-z0-9_]+$'
+      example: faberge_egg_coronation
+
+  responses:
+    NotFound:
+      description: Ресурс не найден.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Экспонат не найден.
+    BadRequest:
+      description: Некорректный запрос.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Не удалось прочитать изображение.
+    Unauthorized:
+      description: Требуется авторизация администратора.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Not authenticated
+    Conflict:
+      description: Конфликт уникальности (например, дубль `label_slug` или номера).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Экспонат с таким label_slug уже существует.
+    PayloadTooLarge:
+      description: Файл превышает допустимый размер (10 МБ).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Размер файла превышает 10 МБ.
+    UnsupportedMediaType:
+      description: Неподдерживаемый формат файла.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Поддерживаются только JPEG, PNG и WebP.
+    UnprocessableEntity:
+      description: Ошибка валидации запроса (формат FastAPI).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HTTPValidationError'
+    UpstreamError:
+      description: >-
+        Ошибка внешнего сервиса (YOLO / YandexGPT / SpeechKit).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: Сервис распознавания временно недоступен.
+
+  schemas:
+    # ── Системное ──
+    HealthStatus:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          example: ok
+        version:
+          type: string
+          example: 0.1.0-mvp
+        time:
+          type: string
+          format: date-time
+          example: '2026-05-30T10:00:00Z'
+        dependencies:
+          type: object
+          description: Доступность внешних зависимостей.
+          additionalProperties:
+            type: string
+            enum: [up, down]
+          example:
+            postgres: up
+            object_storage: up
+            yolo: up
+            yandexgpt: up
+            speechkit: up
+
+    # ── Залы ──
+    Hall:
+      type: object
+      required: [id, hall_number]
+      properties:
+        id:
+          type: integer
+          example: 5
+        hall_number:
+          type: integer
+          description: Номер зала на плане экспозиции (уникальный).
+          example: 5
+        name:
+          type: string
+          nullable: true
+          example: Синяя гостиная
+        description:
+          type: string
+          nullable: true
+          description: >-
+            Описание зала для уровня зала на карте и для контекста ИИ-гида.
+            Наполняется из плана экспозиции и путеводителя.
+          example: >-
+            Парадная гостиная Шуваловского дворца, где представлены девять
+            императорских пасхальных яиц Фаберже.
+        level:
+          type: integer
+          nullable: true
+          description: Этаж / уровень в здании музея.
+          example: 2
+        cover_image_url:
+          type: string
+          format: uri
+          nullable: true
+          example: https://cdn.example.cloud/halls/blue/cover.jpg
+        showcase_count:
+          type: integer
+          nullable: true
+          example: 6
+        exhibit_count:
+          type: integer
+          nullable: true
+          example: 24
+
+    HallBrief:
+      type: object
+      description: Краткая ссылка на зал (для вложений в карточку экспоната).
+      required: [id, hall_number]
+      properties:
+        id:
+          type: integer
+          example: 5
+        hall_number:
+          type: integer
+          example: 5
+        name:
+          type: string
+          nullable: true
+          example: Синяя гостиная
+
+    HallDetail:
+      allOf:
+        - $ref: '#/components/schemas/Hall'
+        - type: object
+          properties:
+            showcases:
+              type: array
+              description: Витрины зала (могут включаться по необходимости).
+              items:
+                $ref: '#/components/schemas/Showcase'
+
+    MapHall:
+      allOf:
+        - $ref: '#/components/schemas/Hall'
+        - type: object
+          properties:
+            showcases:
+              type: array
+              items:
+                $ref: '#/components/schemas/Showcase'
+
+    MapResponse:
+      type: object
+      required: [halls]
+      properties:
+        halls:
+          type: array
+          items:
+            $ref: '#/components/schemas/MapHall'
+
+    HallListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Hall'
+        total:
+          type: integer
+          example: 12
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+
+    # ── Витрины ──
+    Showcase:
+      type: object
+      required: [id, hall_id, showcase_number]
+      properties:
+        id:
+          type: integer
+          example: 12
+        hall_id:
+          type: integer
+          example: 5
+        showcase_number:
+          type: integer
+          description: Номер витрины внутри зала (уникален в пределах зала).
+          example: 3
+        name:
+          type: string
+          nullable: true
+          example: Императорские пасхальные яйца
+        exhibit_count:
+          type: integer
+          nullable: true
+          example: 4
+
+    ShowcaseBrief:
+      type: object
+      required: [id, showcase_number]
+      properties:
+        id:
+          type: integer
+          example: 12
+        showcase_number:
+          type: integer
+          example: 3
+
+    ShowcaseDetail:
+      allOf:
+        - $ref: '#/components/schemas/Showcase'
+        - type: object
+          properties:
+            hall:
+              $ref: '#/components/schemas/HallBrief'
+            exhibits:
+              type: array
+              items:
+                $ref: '#/components/schemas/ExhibitSummary'
+
+    ShowcaseListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Showcase'
+        total:
+          type: integer
+          example: 6
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+
+    # ── Экспонаты ──
+    Image:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: https://cdn.example.cloud/exhibits/coronation/main.jpg
+        alt:
+          type: string
+          nullable: true
+          example: Коронационное яйцо, общий вид
+        width:
+          type: integer
+          nullable: true
+          example: 1600
+        height:
+          type: integer
+          nullable: true
+          example: 1600
+
+    ExhibitSummary:
+      type: object
+      description: Краткое представление экспоната для списков и карусели.
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          example: 101
+        label_slug:
+          type: string
+          nullable: true
+          example: faberge_egg_coronation
+        name:
+          type: string
+          example: Яйцо «Коронационное»
+        year_created:
+          type: integer
+          nullable: true
+          example: 1897
+        master_name:
+          type: string
+          nullable: true
+          example: Михаил Перхин
+        thumbnail_url:
+          type: string
+          format: uri
+          nullable: true
+          example: https://cdn.example.cloud/exhibits/coronation/thumb.jpg
+        hall_id:
+          type: integer
+          nullable: true
+          example: 5
+        showcase_id:
+          type: integer
+          nullable: true
+          example: 12
+
+    Exhibit:
+      type: object
+      description: >-
+        Полная карточка экспоната для публичного API. Внутреннее поле
+        `raw_history` сюда не включается.
+      required: [id, name]
+      properties:
+        id:
+          type: integer
+          example: 101
+        label_slug:
+          type: string
+          nullable: true
+          description: Класс, который возвращает YOLO.
+          example: faberge_egg_coronation
+        name:
+          type: string
+          example: Яйцо «Коронационное»
+        year_created:
+          type: integer
+          nullable: true
+          example: 1897
+        master_name:
+          type: string
+          nullable: true
+          example: Михаил Перхин
+        material:
+          type: string
+          nullable: true
+          example: Золото, гильоше-эмаль, бриллианты, рубины
+        short_description:
+          type: string
+          nullable: true
+          example: >-
+            Пасхальное яйцо-сюрприз, подаренное Николаем II императрице
+            Александре Фёдоровне в память о коронации 1896 года.
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Главное изображение (Object Storage + CDN).
+          example: https://cdn.example.cloud/exhibits/coronation/main.jpg
+        images:
+          type: array
+          description: Галерея изображений.
+          items:
+            $ref: '#/components/schemas/Image'
+        model_3d_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Ссылка на 3D-модель Koinovo.
+          example: https://koinovo.ru/fabergemuseum/coronation
+        model_3d_embed:
+          type: string
+          nullable: true
+          description: HTML/iframe embed-код 3D-модели (когда предоставит Koinovo).
+        audio_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Предсинтезированная озвучка краткого описания (если есть).
+        source_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Первоисточник описания на сайте музея.
+          example: https://fabergemuseum.ru/kollekczii/shedevryi-kollekczii/
+        hall:
+          $ref: '#/components/schemas/HallBrief'
+        showcase:
+          $ref: '#/components/schemas/ShowcaseBrief'
+
+    ExhibitListResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExhibitSummary'
+        total:
+          type: integer
+          example: 24
+        limit:
+          type: integer
+          example: 20
+        offset:
+          type: integer
+          example: 0
+
+    # ── Поиск ──
+    SearchResponse:
+      type: object
+      required: [query, halls, exhibits]
+      properties:
+        query:
+          type: string
+          example: коронационное
+        halls:
+          type: array
+          items:
+            $ref: '#/components/schemas/Hall'
+        exhibits:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExhibitSummary'
+        total:
+          type: integer
+          description: Суммарное число найденных объектов.
+          example: 1
+
+    # ── Распознавание ──
+    RecognitionCandidate:
+      type: object
+      required: [label_slug, confidence]
+      properties:
+        label_slug:
+          type: string
+          example: faberge_egg_winter
+        name:
+          type: string
+          nullable: true
+          example: Яйцо «Зимнее»
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.41
+
+    RecognitionResponse:
+      type: object
+      required: [recognized]
+      properties:
+        recognized:
+          type: boolean
+          description: Распознан ли экспонат с уверенностью выше порога.
+          example: true
+        label_slug:
+          type: string
+          nullable: true
+          example: faberge_egg_coronation
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          nullable: true
+          example: 0.94
+        exhibit:
+          allOf:
+            - $ref: '#/components/schemas/Exhibit'
+          nullable: true
+          description: Найденная карточка (если распознано), иначе `null`.
+        candidates:
+          type: array
+          description: Вероятные классы при неуверенном распознавании.
+          items:
+            $ref: '#/components/schemas/RecognitionCandidate'
+        request_id:
+          type: string
+          format: uuid
+          description: Идентификатор запроса для трассировки.
+          example: 7b1c0e2a-9f3d-4a2b-8c10-2a4d6e8f0a11
+        processing_ms:
+          type: integer
+          nullable: true
+          example: 312
+
+    # ── ИИ-гид ──
+    GuideStyle:
+      type: string
+      description: Стиль генерируемого рассказа.
+      enum: [engaging, historical, short, kids, expert]
+      default: engaging
+
+    GuideContext:
+      type: object
+      description: >-
+        Контекст диалога. Укажите хотя бы одно из полей. `exhibit_id`/`label_slug`
+        — контекст экспоната, `hall_id` — контекст зала.
+      properties:
+        exhibit_id:
+          type: integer
+          nullable: true
+          example: 101
+        label_slug:
+          type: string
+          nullable: true
+          example: faberge_egg_coronation
+        hall_id:
+          type: integer
+          nullable: true
+          example: 5
+
+    StoryRequest:
+      type: object
+      description: 'Запрос на генерацию рассказа. Укажите `exhibit_id` или `label_slug`.'
+      properties:
+        exhibit_id:
+          type: integer
+          nullable: true
+          example: 101
+        label_slug:
+          type: string
+          nullable: true
+          example: faberge_egg_coronation
+        style:
+          $ref: '#/components/schemas/GuideStyle'
+        language:
+          type: string
+          default: ru
+          description: Язык рассказа (ISO-639-1).
+          example: ru
+        include_audio:
+          type: boolean
+          default: false
+          description: Сразу синтезировать озвучку и вернуть `audio_url`.
+        max_questions:
+          type: integer
+          minimum: 0
+          maximum: 6
+          default: 4
+          description: Сколько вопросов-подсказок сгенерировать (по ТЗ — 3–4).
+
+    StoryResponse:
+      type: object
+      required: [text, suggested_questions]
+      properties:
+        exhibit_id:
+          type: integer
+          nullable: true
+          example: 101
+        label_slug:
+          type: string
+          nullable: true
+          example: faberge_egg_coronation
+        style:
+          $ref: '#/components/schemas/GuideStyle'
+        text:
+          type: string
+          description: Сгенерированный YandexGPT рассказ.
+        suggested_questions:
+          type: array
+          description: 3–4 контекстных вопроса-подсказки для продолжения диалога.
+          items:
+            type: string
+          example:
+            - Сколько времени ушло на создание?
+            - Кому подарили это яйцо?
+            - Что за сюрприз спрятан внутри?
+        audio_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Озвучка рассказа, если запрошен `include_audio`.
+        model:
+          type: string
+          nullable: true
+          example: yandexgpt/latest
+        generated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant, system]
+          example: user
+        content:
+          type: string
+          example: Кому подарили это яйцо?
+
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Идентификатор диалога. Если не задан — сервер создаст новый.
+          example: 2f6a9b3c-1d4e-4f8a-9c2b-5e7a1d0c3b66
+        context:
+          $ref: '#/components/schemas/GuideContext'
+        message:
+          type: string
+          minLength: 1
+          description: Сообщение пользователя (часто — одна из подсказок).
+          example: Кому подарили это яйцо?
+        history:
+          type: array
+          description: Опциональная история сообщений (если не используется session_id).
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        language:
+          type: string
+          default: ru
+          example: ru
+        max_questions:
+          type: integer
+          minimum: 0
+          maximum: 6
+          default: 3
+
+    ChatResponse:
+      type: object
+      required: [session_id, answer, suggested_questions]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          example: 2f6a9b3c-1d4e-4f8a-9c2b-5e7a1d0c3b66
+        answer:
+          type: string
+        suggested_questions:
+          type: array
+          items:
+            type: string
+        context:
+          $ref: '#/components/schemas/GuideContext'
+
+    # ── Озвучивание ──
+    SpeechVoice:
+      type: string
+      description: Голос Yandex SpeechKit.
+      enum: [alena, filipp, jane, omazh, zahar, ermil]
+      default: alena
+
+    AudioFormat:
+      type: string
+      enum: [mp3, oggopus, wav]
+      default: mp3
+
+    SpeechRequest:
+      type: object
+      description: 'Запрос синтеза речи. Укажите `text` или `exhibit_id`.'
+      properties:
+        text:
+          type: string
+          nullable: true
+          description: Текст для озвучивания.
+        exhibit_id:
+          type: integer
+          nullable: true
+          description: Озвучить краткое описание экспоната.
+          example: 101
+        voice:
+          $ref: '#/components/schemas/SpeechVoice'
+        format:
+          $ref: '#/components/schemas/AudioFormat'
+        speed:
+          type: number
+          format: float
+          minimum: 0.1
+          maximum: 3.0
+          default: 1.0
+          example: 1.0
+        emotion:
+          type: string
+          enum: [neutral, good, evil]
+          default: neutral
+
+    SpeechResponse:
+      type: object
+      required: [audio_url, format, voice]
+      properties:
+        audio_url:
+          type: string
+          format: uri
+          example: https://cdn.example.cloud/tts/coronation_alena.mp3
+        format:
+          $ref: '#/components/schemas/AudioFormat'
+        voice:
+          $ref: '#/components/schemas/SpeechVoice'
+        duration_ms:
+          type: integer
+          nullable: true
+          example: 21400
+        characters:
+          type: integer
+          nullable: true
+          description: Сколько символов синтезировано (для учёта квот SpeechKit).
+          example: 248
+        cached:
+          type: boolean
+          nullable: true
+          description: Отдано ли аудио из кэша Object Storage.
+          example: true
+
+    # ── Администрирование ──
+    HallCreate:
+      type: object
+      required: [hall_number]
+      properties:
+        hall_number:
+          type: integer
+          example: 5
+        name:
+          type: string
+          nullable: true
+          example: Синяя гостиная
+        description:
+          type: string
+          nullable: true
+        level:
+          type: integer
+          nullable: true
+          example: 2
+
+    ShowcaseCreate:
+      type: object
+      required: [hall_id, showcase_number]
+      properties:
+        hall_id:
+          type: integer
+          example: 5
+        showcase_number:
+          type: integer
+          example: 3
+        name:
+          type: string
+          nullable: true
+
+    ExhibitCreate:
+      type: object
+      required: [showcase_id, name]
+      properties:
+        showcase_id:
+          type: integer
+          example: 12
+        label_slug:
+          type: string
+          nullable: true
+          pattern: '^[a-z0-9_]+$'
+          example: faberge_egg_winter
+        name:
+          type: string
+          example: Яйцо «Зимнее»
+        year_created:
+          type: integer
+          nullable: true
+          example: 1913
+        master_name:
+          type: string
+          nullable: true
+          example: Альма Пиль
+        material:
+          type: string
+          nullable: true
+          example: Горный хрусталь, платина, бриллианты
+        short_description:
+          type: string
+          nullable: true
+        raw_history:
+          type: string
+          nullable: true
+          description: >-
+            Внутренние факты для генерации рассказа LLM. Рекомендуется хранить
+            буллитами или в JSON. Через публичный API не отдаётся.
+          example: >-
+            Заказчик — Николай II. Подарок императрице Марии Фёдоровне.
+            Дизайн — Альма Пиль. Горный хрусталь и бриллианты. Сюрприз —
+            корзина подснежников.
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+        model_3d_url:
+          type: string
+          format: uri
+          nullable: true
+
+    ExhibitUpdate:
+      allOf:
+        - $ref: '#/components/schemas/ExhibitCreate'
+      description: Полная замена полей экспоната (PUT).
+
+    ExhibitPatch:
+      type: object
+      description: Частичное обновление — все поля необязательны.
+      properties:
+        showcase_id:
+          type: integer
+        label_slug:
+          type: string
+          pattern: '^[a-z0-9_]+$'
+        name:
+          type: string
+        year_created:
+          type: integer
+          nullable: true
+        master_name:
+          type: string
+          nullable: true
+        material:
+          type: string
+          nullable: true
+        short_description:
+          type: string
+          nullable: true
+        raw_history:
+          type: string
+          nullable: true
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+        model_3d_url:
+          type: string
+          format: uri
+          nullable: true
+
+    ExhibitAdmin:
+      allOf:
+        - $ref: '#/components/schemas/Exhibit'
+        - type: object
+          description: Админское представление — включает внутреннее `raw_history`.
+          properties:
+            raw_history:
+              type: string
+              nullable: true
+              example: >-
+                Заказчик — Николай II. Подарок императрице Марии Фёдоровне.
+
+    MediaUploadResponse:
+      type: object
+      required: [image_url, object_key]
+      properties:
+        image_url:
+          type: string
+          format: uri
+          example: https://cdn.example.cloud/exhibits/winter/main.jpg
+        thumbnail_url:
+          type: string
+          format: uri
+          nullable: true
+          example: https://cdn.example.cloud/exhibits/winter/thumb.jpg
+        object_key:
+          type: string
+          description: Ключ объекта в Yandex Object Storage.
+          example: exhibits/winter/main.jpg
+
+    AnalyticsTopItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 101
+        name:
+          type: string
+          example: Яйцо «Коронационное»
+        count:
+          type: integer
+          example: 187
+
+    AnalyticsOverview:
+      type: object
+      properties:
+        from:
+          type: string
+          format: date
+          nullable: true
+          example: '2026-05-25'
+        to:
+          type: string
+          format: date
+          nullable: true
+          example: '2026-06-25'
+        total_sessions:
+          type: integer
+          example: 1240
+        total_recognitions:
+          type: integer
+          example: 980
+        recognition_success_rate:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          example: 0.86
+        total_chat_messages:
+          type: integer
+          example: 3450
+        total_audio_plays:
+          type: integer
+          example: 1120
+        top_exhibits:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsTopItem'
+        top_halls:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalyticsTopItem'
+
+    # ── Телеметрия ──
+    Event:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum:
+            - app_open
+            - hall_view
+            - showcase_view
+            - exhibit_view
+            - recognition
+            - chat_message
+            - audio_play
+            - suggestion_click
+          example: exhibit_view
+        exhibit_id:
+          type: integer
+          nullable: true
+        hall_id:
+          type: integer
+          nullable: true
+        label_slug:
+          type: string
+          nullable: true
+        ts:
+          type: string
+          format: date-time
+          nullable: true
+        props:
+          type: object
+          nullable: true
+          additionalProperties: true
+
+    EventBatch:
+      type: object
+      required: [events]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          nullable: true
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Event'
+
+    # ── Ошибки (формат FastAPI) ──
+    Error:
+      type: object
+      description: Стандартная ошибка приложения (FastAPI `HTTPException`).
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          example: Экспонат не найден.
+
+    ValidationErrorItem:
+      type: object
+      required: [loc, msg, type]
+      properties:
+        loc:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: integer
+          example: [body, message]
+        msg:
+          type: string
+          example: field required
+        type:
+          type: string
+          example: value_error.missing
+
+    HTTPValidationError:
+      type: object
+      description: Ошибка валидации запроса в формате FastAPI.
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationErrorItem'

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>API ИИ-гида музея Фаберже — Swagger UI</title>
+  <link rel="icon" type="image/png" href="./favicon-32x32.png" sizes="32x32" />
+  <link rel="stylesheet" href="./swagger-ui.css" />
+  <style>
+    html { box-sizing: border-box; overflow-y: scroll; }
+    *, *:before, *:after { box-sizing: inherit; }
+    body { margin: 0; background: #fafafa; }
+
+    /* Брендированная шапка под музей Фаберже */
+    .fbg-header {
+      background: linear-gradient(90deg, #1b2a4a 0%, #2a3f6e 100%);
+      color: #fff;
+      padding: 14px 22px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-bottom: 3px solid #c9a14a;
+    }
+    .fbg-header .dot {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #c9a14a; box-shadow: 0 0 0 4px rgba(201,161,74,0.25);
+      flex: 0 0 auto;
+    }
+    .fbg-header h1 { font: 600 17px/1.2 -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    .fbg-header .sub { font: 400 12px/1.2 -apple-system, Segoe UI, Roboto, sans-serif; opacity: .8; }
+    .fbg-header .spacer { flex: 1; }
+    .fbg-header a {
+      color: #fff; text-decoration: none; font: 500 12px/1 sans-serif;
+      border: 1px solid rgba(255,255,255,.35); border-radius: 6px;
+      padding: 7px 11px; white-space: nowrap;
+    }
+    .fbg-header a:hover { background: rgba(255,255,255,.12); }
+    .swagger-ui .topbar { display: none; } /* прячем стандартный explore-бар */
+  </style>
+</head>
+<body>
+  <div class="fbg-header">
+    <span class="dot"></span>
+    <div>
+      <h1>API ИИ-гида музея Фаберже</h1>
+      <div class="sub">MVP-контракт · 25 мая – 25 июня · FastAPI / Yandex Cloud</div>
+    </div>
+    <span class="spacer"></span>
+    <a href="/openapi.yaml" download>Скачать openapi.yaml</a>
+  </div>
+
+  <div id="swagger-ui"></div>
+
+  <script src="./swagger-ui-bundle.js" charset="UTF-8"></script>
+  <script src="./swagger-ui-standalone-preset.js" charset="UTF-8"></script>
+  <script>
+    window.ui = SwaggerUIBundle({
+      url: "/openapi.yaml",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      displayRequestDuration: true,
+      docExpansion: "list",
+      defaultModelsExpandDepth: 1,
+      defaultModelExpandDepth: 3,
+      filter: true,
+      tryItOutEnabled: true,
+      persistAuthorization: true,
+      syntaxHighlight: { activate: true, theme: "agate" },
+      presets: [
+        SwaggerUIBundle.presets.apis,
+        SwaggerUIStandalonePreset
+      ],
+      plugins: [
+        SwaggerUIBundle.plugins.DownloadUrl
+      ],
+      layout: "BaseLayout"
+    });
+  </script>
+</body>
+</html>
