@@ -21,6 +21,11 @@ async def save_image(data: bytes, filename: str, content_type: str, prefix: str 
     """Сохранить изображение и вернуть публичный URL + ключ объекта."""
     safe_name = os.path.basename(filename) or "image"
     object_key = f"{prefix}/{uuid.uuid4().hex}/{safe_name}"
+    return await save_bytes(data, object_key, content_type)
+
+
+async def save_bytes(data: bytes, object_key: str, content_type: str) -> StoredObject:
+    """Сохранить произвольные байты по заданному ключу (Object Storage или локальный стаб)."""
     if settings.storage_configured:
         return _save_object_storage(data, object_key, content_type)
     return _save_local(data, object_key)

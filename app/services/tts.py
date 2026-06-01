@@ -15,10 +15,11 @@ from typing import Optional
 import httpx
 
 from ..config import settings
-from . import UpstreamError
+from . import UpstreamError, storage
 
 SPEECHKIT_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
 _CHARS_PER_SEC = 14.0  # грубая оценка темпа речи
+_CONTENT_TYPE = {"mp3": "audio/mpeg", "oggopus": "audio/ogg", "wav": "audio/wav"}
 
 
 @dataclass
@@ -94,16 +95,24 @@ async def _synthesize_yandex(
     except Exception as exc:  # noqa: BLE001
         raise UpstreamError("Сервис озвучивания временно недоступен.") from exc
 
-    # Кэшируем результат в Object Storage в проде; локально — в media/.
+    # Кэшируем результат в Object Storage в проде (ссылка переживает смену
+    # экземпляра функции); локально, без бакета, — в media/.
     key = hashlib.sha256(f"{voice}:{text}".encode("utf-8")).hexdigest()[:16]
     rel = f"tts/{voice}_{key}.{fmt}"
-    out_dir = os.path.join(settings.media_dir, "tts")
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(settings.media_dir, rel), "wb") as fh:
-        fh.write(audio_bytes)
+    if settings.storage_configured:
+        stored = await storage.save_bytes(
+            audio_bytes, rel, _CONTENT_TYPE.get(fmt, "application/octet-stream")
+        )
+        audio_url = stored.url
+    else:
+        out_dir = os.path.join(settings.media_dir, "tts")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(settings.media_dir, rel), "wb") as fh:
+            fh.write(audio_bytes)
+        audio_url = f"{settings.public_base_url}/media/{rel}"
     seconds = max(1.0, characters / _CHARS_PER_SEC)
     return SpeechOutcome(
-        audio_url=f"{settings.public_base_url}/media/{rel}",
+        audio_url=audio_url,
         fmt=fmt,
         duration_ms=int(seconds * 1000),
         characters=characters,
