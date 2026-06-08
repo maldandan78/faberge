@@ -1,0 +1,18 @@
+type: http_request
+model: http_request
+id: rq_d7Cx5HrrmR
+createdAt: 2026-06-01T15:43:24.674667
+updatedAt: 2026-06-01T15:43:36.842400
+workspaceId: wk_JDtyNP6Jwb
+folderId: null
+authentication: {}
+authenticationType: null
+body: {}
+bodyType: null
+description: ''
+headers: []
+method: GET
+name: /map
+sortPriority: -1780328510862.999
+url: ${[ BASE_URL ]}/map
+urlParameters: []

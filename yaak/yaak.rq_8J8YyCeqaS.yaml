@@ -1,0 +1,18 @@
+type: http_request
+model: http_request
+id: rq_8J8YyCeqaS
+createdAt: 2026-06-01T15:41:50.865643
+updatedAt: 2026-06-01T15:43:39.534970
+workspaceId: wk_JDtyNP6Jwb
+folderId: null
+authentication: {}
+authenticationType: null
+body: {}
+bodyType: null
+description: ''
+headers: []
+method: GET
+name: /health
+sortPriority: -1780328510863.0
+url: ${[ BASE_URL ]}/health
+urlParameters: []

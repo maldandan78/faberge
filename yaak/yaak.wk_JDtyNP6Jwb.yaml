@@ -1,0 +1,15 @@
+type: workspace
+model: workspace
+id: wk_JDtyNP6Jwb
+createdAt: 2026-06-01T15:41:47.983064
+updatedAt: 2026-06-01T15:41:47.983065
+authentication: {}
+authenticationType: null
+description: ''
+headers: []
+name: faberge
+encryptionKeyChallenge: null
+settingValidateCertificates: true
+settingFollowRedirects: true
+settingRequestTimeout: 0
+settingDnsOverrides: []

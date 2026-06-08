@@ -1,0 +1,18 @@
+type: environment
+model: environment
+id: ev_B4gHZi5njT
+workspaceId: wk_JDtyNP6Jwb
+createdAt: 2026-06-01T15:41:48.076040
+updatedAt: 2026-06-08T07:43:01.063983
+name: Global Variables
+public: true
+base: true
+parentModel: workspace
+parentId: null
+variables:
+- enabled: true
+  name: BASE_URL
+  value: https://d5dhcivtos7rfvdfdpg2.xxg4zr82.apigw.yandexcloud.net
+  id: UwVUdEH3XK
+color: null
+sortPriority: 0.0

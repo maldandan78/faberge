@@ -1,0 +1,23 @@
+type: http_request
+model: http_request
+id: rq_5i7QiupdRm
+createdAt: 2026-06-01T15:44:33.784036
+updatedAt: 2026-06-01T15:45:11.737713
+workspaceId: wk_JDtyNP6Jwb
+folderId: null
+authentication: {}
+authenticationType: null
+body:
+  text: '{"exhibit_id": 101, "style": "engaging"}'
+bodyType: application/json
+description: ''
+headers:
+- enabled: true
+  name: Content-Type
+  value: application/json
+  id: KTHQC2Mhnm
+method: POST
+name: /guide/story
+sortPriority: -1780328510862.996
+url: ${[ BASE_URL ]}/guide/story
+urlParameters: []

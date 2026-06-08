@@ -1,0 +1,23 @@
+type: http_request
+model: http_request
+id: rq_BKqgbFnoGk
+createdAt: 2026-06-01T15:45:30.498156
+updatedAt: 2026-06-01T15:45:44.143584
+workspaceId: wk_JDtyNP6Jwb
+folderId: null
+authentication: {}
+authenticationType: null
+body:
+  text: '{"exhibit_id": 101, "voice": "alena", "format": "mp3"}'
+bodyType: application/json
+description: ''
+headers:
+- enabled: true
+  name: Content-Type
+  value: application/json
+  id: KTHQC2Mhnm
+method: POST
+name: /speech
+sortPriority: -1780328510862.995
+url: ${[ BASE_URL ]}/speech
+urlParameters: []
