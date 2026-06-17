@@ -1,7 +1,9 @@
 """Карта и навигация: зал → витрина → экспонат."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import crud
@@ -46,6 +48,15 @@ async def list_hall_exhibits(
     if not await crud.hall_exists(session, hall_id):
         raise HTTPException(status_code=404, detail="Зал не найден.")
     return await crud.list_hall_exhibits(session, hall_id, p.limit, p.offset)
+
+
+@router.get("/showcases", response_model=sch.ShowcaseListResponse, summary="Список витрин")
+async def list_showcases(
+    p: Pagination = Depends(pagination),
+    hall_id: Optional[int] = Query(None, ge=1, description="Фильтр по идентификатору зала."),
+    session: AsyncSession = Depends(get_session),
+) -> sch.ShowcaseListResponse:
+    return await crud.list_showcases(session, p.limit, p.offset, hall_id)
 
 
 @router.get("/showcases/{showcase_id}", response_model=sch.ShowcaseDetail, summary="Получить витрину")

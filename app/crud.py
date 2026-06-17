@@ -206,6 +206,22 @@ async def list_hall_showcases(session: AsyncSession, hall_id: int, limit: int, o
     return sch.ShowcaseListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
+async def list_showcases(
+    session: AsyncSession, limit: int, offset: int, hall_id: Optional[int] = None
+) -> sch.ShowcaseListResponse:
+    flt = (m.Showcase.hall_id == hall_id) if hall_id is not None else None
+    count_stmt = select(func.count(m.Showcase.id))
+    list_stmt = select(m.Showcase).order_by(m.Showcase.hall_id, m.Showcase.showcase_number)
+    if flt is not None:
+        count_stmt = count_stmt.where(flt)
+        list_stmt = list_stmt.where(flt)
+    total = (await session.execute(count_stmt)).scalar_one()
+    showcases = (await session.execute(list_stmt.limit(limit).offset(offset))).scalars().all()
+    counts = await _showcase_exhibit_counts(session, [s.id for s in showcases])
+    items = [to_showcase(s, counts.get(s.id, 0)) for s in showcases]
+    return sch.ShowcaseListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
 async def get_showcase(session: AsyncSession, showcase_id: int) -> Optional[sch.ShowcaseDetail]:
     s = (
         await session.execute(

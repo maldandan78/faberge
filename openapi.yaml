@@ -296,6 +296,37 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
+  /showcases:
+    get:
+      tags: [Карта и навигация]
+      summary: Список / фильтрация витрин
+      description: >-
+        Плоский постраничный список витрин по всем залам, с необязательным
+        фильтром по `hall_id`. Универсальная выборка для админки и навигации
+        (формат ответа — как у `/halls` и `/exhibits`).
+      operationId: listShowcases
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: hall_id
+          in: query
+          description: Фильтр по идентификатору зала.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          example: 5
+      responses:
+        '200':
+          description: Список витрин.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShowcaseListResponse'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
   /showcases/{showcase_id}:
     get:
       tags: [Карта и навигация]
