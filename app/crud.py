@@ -379,6 +379,37 @@ async def delete_exhibit(session: AsyncSession, ex: m.Exhibit) -> None:
     await session.commit()
 
 
+def collect_image_urls(ex: m.Exhibit) -> List[str]:
+    """Все URL изображений экспоната (первичное + галерея) — для очистки хранилища.
+
+    Требует, чтобы коллекция ``ex.images`` была уже загружена (см. ``_EXHIBIT_FULL``).
+    """
+    urls = [img.url for img in ex.images]
+    if ex.image_url:
+        urls.append(ex.image_url)
+    return urls
+
+
+async def get_exhibit_image(session: AsyncSession, exhibit_id: int, image_id: int) -> Optional[m.ExhibitImage]:
+    return (
+        await session.execute(
+            select(m.ExhibitImage).where(
+                m.ExhibitImage.id == image_id, m.ExhibitImage.exhibit_id == exhibit_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def delete_exhibit_image(session: AsyncSession, img: m.ExhibitImage) -> None:
+    # Если удаляем первичное изображение — снимаем ссылку с exhibits.image_url.
+    if img.is_primary:
+        ex = await session.get(m.Exhibit, img.exhibit_id)
+        if ex is not None and ex.image_url == img.url:
+            ex.image_url = None
+    await session.delete(img)
+    await session.commit()
+
+
 async def add_exhibit_image(session: AsyncSession, exhibit_id: int, url: str, is_primary: bool) -> None:
     if is_primary:
         ex = await session.get(m.Exhibit, exhibit_id)

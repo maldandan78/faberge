@@ -87,7 +87,10 @@ async def delete_exhibit(exhibit_id: int = Path(ge=1), session: AsyncSession = D
     ex = await crud.get_exhibit_orm(session, exhibit_id)
     if ex is None:
         raise HTTPException(status_code=404, detail="Экспонат не найден.")
+    image_urls = crud.collect_image_urls(ex)
     await crud.delete_exhibit(session, ex)
+    # Чистим объекты из хранилища после успешного удаления из БД (best-effort).
+    await storage.delete_many(image_urls)
 
 
 @router.post(
@@ -113,6 +116,23 @@ async def upload_media(
         raise HTTPException(status_code=502, detail=exc.message)
     await crud.add_exhibit_image(session, exhibit_id, stored.url, is_primary)
     return sch.MediaUploadResponse(image_url=stored.url, thumbnail_url=stored.thumbnail_url, object_key=stored.object_key)
+
+
+@router.delete(
+    "/exhibits/{exhibit_id}/media/{image_id}", status_code=204,
+    summary="[Вне MVP] Удалить фото экспоната",
+)
+async def delete_media(
+    exhibit_id: int = Path(ge=1),
+    image_id: int = Path(ge=1),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    img = await crud.get_exhibit_image(session, exhibit_id, image_id)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Изображение не найдено.")
+    url = img.url
+    await crud.delete_exhibit_image(session, img)
+    await storage.delete_many([url])
 
 
 @router.get("/analytics/overview", response_model=sch.AnalyticsOverview, summary="[Вне MVP] Сводная аналитика")

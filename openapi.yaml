@@ -1021,6 +1021,33 @@ paths:
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
 
+  /admin/exhibits/{exhibit_id}/media/{image_id}:
+    delete:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Удалить фото экспоната'
+      description: >-
+        Удаляет изображение из галереи экспоната и сам объект из Object Storage.
+        Если удаляется главное изображение, ссылка снимается с карточки.
+      operationId: deleteExhibitMedia
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+        - name: image_id
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: Идентификатор изображения в галерее экспоната.
+      responses:
+        '204':
+          description: Изображение удалено.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /admin/analytics/overview:
     get:
       tags: [Администрирование]
