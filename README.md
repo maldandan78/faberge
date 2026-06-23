@@ -115,10 +115,12 @@ Dockerfile, docker-compose.yml, .env.example
 | Распознавание | `POST /recognition` (multipart: фото → YOLO) |
 | ИИ-гид | `POST /guide/story`, `POST /guide/chat` (YandexGPT + вопросы-подсказки) |
 | Озвучивание | `POST /speech` (SpeechKit) |
-| Администрирование* | CRUD `/admin/exhibits`, `/admin/halls`, `/admin/showcases`, `/admin/exhibits/{id}/media`, `/admin/analytics/overview` |
+| Админ · вход | `POST /admin/login` (логин/пароль → Bearer-токен; открытый) |
+| Админ · медиа | `GET`/`POST /admin/exhibits/{id}/media`, `DELETE /admin/exhibits/{id}/media/{image_id}`, `POST /admin/halls/{id}/cover` |
+| Администрирование* | CRUD `/admin/exhibits`, `/admin/halls`, `PATCH /admin/halls/{id}`, `/admin/showcases`, `/admin/analytics/overview` |
 | Телеметрия* | `POST /telemetry/events` |
 
-\* — вне MVP; защищено `bearerAuth` (заголовок `Authorization: Bearer <ADMIN_API_TOKEN>`).
+\* — вне MVP; защищено `bearerAuth` (заголовок `Authorization: Bearer <token>`, токен — из `POST /admin/login` или `ADMIN_API_TOKEN`). Загрузка медиа/обложек и вход — рабочие (в MVP): размер ≤ `MAX_UPLOAD_MB` (10 МБ), форматы JPEG/PNG/WebP; `thumbnail_url` совпадает с `image_url` (отдельная миниатюра не генерируется).
 
 ## База данных
 

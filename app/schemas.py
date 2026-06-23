@@ -86,10 +86,12 @@ class ShowcaseListResponse(BaseModel):
 # ── Экспонаты ────────────────────────────────────────────────────────────────
 class Image(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    id: int                              # идентификатор для DELETE /admin/exhibits/{id}/media/{image_id}
     url: str
     alt: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    is_primary: bool = False             # главная фотография экспоната (= exhibits.image_url)
 
 
 class ExhibitSummary(BaseModel):
@@ -257,6 +259,24 @@ class HallCreate(BaseModel):
     level: Optional[int] = None
 
 
+class HallPatch(BaseModel):
+    hall_number: Optional[int] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    level: Optional[int] = None
+    cover_image_url: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
 class ShowcaseCreate(BaseModel):
     hall_id: int
     showcase_number: int
@@ -294,8 +314,9 @@ class ExhibitPatch(BaseModel):
 
 
 class MediaUploadResponse(BaseModel):
+    image_id: int                        # id созданной записи галереи (для DELETE .../media/{image_id})
     image_url: str
-    thumbnail_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None  # сейчас совпадает с image_url — отдельная миниатюра не генерируется
     object_key: str
 
 

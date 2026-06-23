@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8000"
     cors_origins: str = "*"                       # список через запятую
     admin_api_token: str = "dev-admin-token"      # Bearer для /admin/**
+    admin_username: str = "admin"                 # логин для POST /admin/login
+    admin_password: str = "admin"                 # пароль для POST /admin/login (переопределите в проде!)
     media_dir: str = "media"                      # локальное хранилище (стаб Object Storage)
     recognition_confidence_threshold: float = 0.6
     max_upload_mb: int = 10

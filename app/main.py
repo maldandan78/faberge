@@ -99,6 +99,7 @@ app.include_router(search.router)
 app.include_router(recognition.router)
 app.include_router(guide.router)
 app.include_router(speech.router)
+app.include_router(admin.auth_router)
 app.include_router(admin.router)
 app.include_router(telemetry.router)
 

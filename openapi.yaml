@@ -832,6 +832,41 @@ paths:
           $ref: '#/components/responses/UpstreamError'
 
   # ─────────────────────── Администрирование [вне MVP] ───────────────────
+  /admin/login:
+    post:
+      tags: [Администрирование]
+      summary: Логин администратора (логин/пароль → Bearer-токен)
+      description: >-
+        Проверяет логин/пароль (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) и возвращает
+        Bearer-токен администратора. Полученный `access_token` нужно слать в
+        заголовке `Authorization: Bearer <access_token>` ко всем `/admin/**`.
+        Токен статический (не истекает) — соответствует MVP с единственным
+        администратором. Эндпоинт открытый (без авторизации).
+      operationId: adminLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: admin
+              password: admin
+      responses:
+        '200':
+          description: Успешный вход — Bearer-токен администратора.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                access_token: dev-admin-token
+                token_type: bearer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
   /admin/halls:
     post:
       tags: [Администрирование]
@@ -858,6 +893,79 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
+
+  /admin/halls/{hall_id}:
+    patch:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Частично обновить зал'
+      operationId: patchHall
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/HallId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HallPatch'
+      responses:
+        '200':
+          description: Зал обновлён.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HallDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /admin/halls/{hall_id}/cover:
+    post:
+      tags: [Администрирование]
+      summary: Загрузить обложку зала
+      description: >-
+        Загрузка обложки зала (`multipart/form-data`, поле `file`). Лимиты:
+        размер ≤ `MAX_UPLOAD_MB` (по умолчанию 10 МБ), форматы JPEG / PNG / WebP.
+        URL объекта записывается в `cover_image_url` зала; отдельная миниатюра
+        не генерируется. Прежняя обложка удаляется из хранилища (best-effort).
+      operationId: uploadHallCover
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/HallId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Изображение обложки (JPEG/PNG/WebP, ≤ MAX_UPLOAD_MB МБ).
+      responses:
+        '201':
+          description: Обложка загружена, возвращается обновлённый зал.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HallDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
 
   /admin/showcases:
     post:
@@ -1009,12 +1117,39 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /admin/exhibits/{exhibit_id}/media:
+    get:
+      tags: [Администрирование]
+      summary: Список фото экспоната (галерея)
+      description: >-
+        Возвращает галерею экспоната. У каждого фото есть `id` (для
+        `DELETE .../media/{image_id}`) и `is_primary` (какое фото главное).
+      operationId: listExhibitMedia
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      responses:
+        '200':
+          description: Галерея экспоната.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Image'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
       tags: [Администрирование]
-      summary: '[Вне MVP] Загрузить фото экспоната'
+      summary: Загрузить фото экспоната
       description: >-
-        Загрузка изображения экспоната в Yandex Object Storage; возвращает
-        публичные URL (оригинал + превью), раздаваемые через CDN.
+        Загрузка изображения экспоната (`multipart/form-data`: поле `file`,
+        опционально `is_primary`). Лимиты: размер ≤ `MAX_UPLOAD_MB` (по
+        умолчанию 10 МБ), форматы JPEG / PNG / WebP. Ответ содержит `image_id`
+        для последующего `DELETE .../media/{image_id}`. `thumbnail_url` сейчас
+        совпадает с `image_url` — отдельная миниатюра не генерируется.
       operationId: uploadExhibitMedia
       security:
         - bearerAuth: []
@@ -1031,11 +1166,11 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: Изображение (JPEG/PNG/WebP).
+                  description: Изображение (JPEG/PNG/WebP, ≤ MAX_UPLOAD_MB МБ).
                 is_primary:
                   type: boolean
                   default: false
-                  description: Сделать это изображение главным в карточке.
+                  description: Сделать это изображение главным в карточке (= exhibits.image_url).
       responses:
         '201':
           description: Файл загружен.
@@ -1055,7 +1190,7 @@ paths:
   /admin/exhibits/{exhibit_id}/media/{image_id}:
     delete:
       tags: [Администрирование]
-      summary: '[Вне MVP] Удалить фото экспоната'
+      summary: Удалить фото экспоната
       description: >-
         Удаляет изображение из галереи экспоната и сам объект из Object Storage.
         Если удаляется главное изображение, ссылка снимается с карточки.
@@ -1147,8 +1282,10 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: Bearer-токен администратора. Только для эндпоинтов `/admin/**`.
+      description: >-
+        Статический Bearer-токен администратора (получается через
+        `POST /admin/login`). Слать в заголовке `Authorization: Bearer <token>`
+        ко всем эндпоинтам `/admin/**` (кроме `/admin/login`).
 
   parameters:
     Limit:
@@ -1478,8 +1615,12 @@ components:
     # ── Экспонаты ──
     Image:
       type: object
-      required: [url]
+      required: [id, url]
       properties:
+        id:
+          type: integer
+          description: Идентификатор фото в галерее (для DELETE /admin/exhibits/{id}/media/{image_id}).
+          example: 1
         url:
           type: string
           format: uri
@@ -1496,6 +1637,11 @@ components:
           type: integer
           nullable: true
           example: 1600
+        is_primary:
+          type: boolean
+          default: false
+          description: Главное фото экспоната (= exhibits.image_url).
+          example: true
 
     ExhibitSummary:
       type: object
@@ -1949,6 +2095,56 @@ components:
           nullable: true
           example: 2
 
+    HallPatch:
+      type: object
+      description: Частичное обновление зала — переданы только изменяемые поля.
+      properties:
+        hall_number:
+          type: integer
+          nullable: true
+          example: 5
+        name:
+          type: string
+          nullable: true
+          example: Синяя гостиная
+        description:
+          type: string
+          nullable: true
+        level:
+          type: integer
+          nullable: true
+          example: 2
+        cover_image_url:
+          type: string
+          format: uri
+          nullable: true
+          example: https://cdn.example.cloud/halls/blue/cover.jpg
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: admin
+        password:
+          type: string
+          format: password
+          example: admin
+
+    LoginResponse:
+      type: object
+      required: [access_token, token_type]
+      properties:
+        access_token:
+          type: string
+          description: Bearer-токен администратора (слать в Authorization ко всем /admin/**).
+          example: dev-admin-token
+        token_type:
+          type: string
+          default: bearer
+          example: bearer
+
     ShowcaseCreate:
       type: object
       required: [hall_id, showcase_number]
@@ -2066,8 +2262,12 @@ components:
 
     MediaUploadResponse:
       type: object
-      required: [image_url, object_key]
+      required: [image_id, image_url, object_key]
       properties:
+        image_id:
+          type: integer
+          description: Id созданной записи галереи (для DELETE /admin/exhibits/{id}/media/{image_id}).
+          example: 4
         image_url:
           type: string
           format: uri
@@ -2076,7 +2276,8 @@ components:
           type: string
           format: uri
           nullable: true
-          example: https://cdn.example.cloud/exhibits/winter/thumb.jpg
+          description: Сейчас совпадает с image_url — отдельная миниатюра не генерируется.
+          example: https://cdn.example.cloud/exhibits/winter/main.jpg
         object_key:
           type: string
           description: Ключ объекта в Yandex Object Storage.

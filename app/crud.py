@@ -53,7 +53,10 @@ def to_exhibit_summary(e: m.Exhibit) -> sch.ExhibitSummary:
 def to_exhibit(e: m.Exhibit, admin: bool = False) -> sch.Exhibit:
     hall = to_hall_brief(e.showcase.hall) if e.showcase and e.showcase.hall else None
     showcase = sch.ShowcaseBrief(id=e.showcase.id, showcase_number=e.showcase.showcase_number) if e.showcase else None
-    images = [sch.Image(url=i.url, alt=i.alt, width=i.width, height=i.height) for i in e.images]
+    images = [
+        sch.Image(id=i.id, url=i.url, alt=i.alt, width=i.width, height=i.height, is_primary=i.is_primary)
+        for i in e.images
+    ]
     cls = sch.ExhibitAdmin if admin else sch.Exhibit
     data = dict(
         id=e.id,
@@ -360,6 +363,27 @@ async def create_hall(session: AsyncSession, data: sch.HallCreate) -> sch.HallDe
     return result
 
 
+async def get_hall_orm(session: AsyncSession, hall_id: int) -> Optional[m.Hall]:
+    return (await session.execute(select(m.Hall).where(m.Hall.id == hall_id))).scalar_one_or_none()
+
+
+async def patch_hall(session: AsyncSession, hall: m.Hall, data: sch.HallPatch) -> sch.HallDetail:
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(hall, field, value)
+    await session.commit()
+    result = await get_hall(session, hall.id)
+    assert result is not None
+    return result
+
+
+async def set_hall_cover(session: AsyncSession, hall: m.Hall, cover_image_url: str) -> sch.HallDetail:
+    hall.cover_image_url = cover_image_url
+    await session.commit()
+    result = await get_hall(session, hall.id)
+    assert result is not None
+    return result
+
+
 async def create_showcase(session: AsyncSession, data: sch.ShowcaseCreate) -> sch.ShowcaseDetail:
     sc = m.Showcase(hall_id=data.hall_id, showcase_number=data.showcase_number, name=data.name)
     session.add(sc)
@@ -426,14 +450,24 @@ async def delete_exhibit_image(session: AsyncSession, img: m.ExhibitImage) -> No
     await session.commit()
 
 
-async def add_exhibit_image(session: AsyncSession, exhibit_id: int, url: str, is_primary: bool) -> None:
+async def list_exhibit_images(session: AsyncSession, exhibit_id: int) -> List[m.ExhibitImage]:
+    rows = await session.execute(
+        select(m.ExhibitImage).where(m.ExhibitImage.exhibit_id == exhibit_id).order_by(m.ExhibitImage.position, m.ExhibitImage.id)
+    )
+    return list(rows.scalars().all())
+
+
+async def add_exhibit_image(session: AsyncSession, exhibit_id: int, url: str, is_primary: bool) -> m.ExhibitImage:
     if is_primary:
         ex = await session.get(m.Exhibit, exhibit_id)
         if ex is not None:
             ex.image_url = url
     pos = (await session.execute(select(func.coalesce(func.max(m.ExhibitImage.position), -1)).where(m.ExhibitImage.exhibit_id == exhibit_id))).scalar_one() + 1
-    session.add(m.ExhibitImage(exhibit_id=exhibit_id, url=url, is_primary=is_primary, position=pos))
+    img = m.ExhibitImage(exhibit_id=exhibit_id, url=url, is_primary=is_primary, position=pos)
+    session.add(img)
     await session.commit()
+    await session.refresh(img)
+    return img
 
 
 # ── Телеметрия / аналитика ───────────────────────────────────────────────────

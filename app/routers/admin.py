@@ -15,9 +15,37 @@ from ..db import get_session
 from ..dependencies import require_admin
 from ..services import UpstreamError, storage
 
+# Логин выдаёт токен, поэтому НЕ должен сам требовать токен — отдельный роутер без require_admin.
+auth_router = APIRouter(prefix="/admin", tags=["Администрирование"])
 router = APIRouter(prefix="/admin", tags=["Администрирование"], dependencies=[Depends(require_admin)])
 
 _ALLOWED_IMG = {"image/jpeg", "image/png", "image/webp"}
+
+
+@auth_router.post(
+    "/login", response_model=sch.LoginResponse,
+    summary="Логин администратора (логин/пароль → Bearer-токен)",
+    description=(
+        "Проверяет логин/пароль (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) и возвращает "
+        "Bearer-токен администратора. Полученный `access_token` нужно слать в заголовке "
+        "`Authorization: Bearer <access_token>` ко всем `/admin/**`. Токен статический "
+        "(не истекает) — соответствует MVP с единственным администратором."
+    ),
+)
+async def login(data: sch.LoginRequest) -> sch.LoginResponse:
+    if data.username != settings.admin_username or data.password != settings.admin_password:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль.")
+    return sch.LoginResponse(access_token=settings.admin_api_token, token_type="bearer")
+
+
+async def _read_validated_image(file: UploadFile) -> bytes:
+    """Прочитать загруженный файл с проверкой типа и размера (общая для фото и обложки)."""
+    if file.content_type not in _ALLOWED_IMG:
+        raise HTTPException(status_code=415, detail="Поддерживаются только JPEG, PNG и WebP.")
+    data = await file.read()
+    if len(data) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"Размер файла превышает {settings.max_upload_mb} МБ.")
+    return data
 
 
 @router.post("/halls", response_model=sch.HallDetail, status_code=201, summary="[Вне MVP] Создать зал")
@@ -27,6 +55,50 @@ async def create_hall(data: sch.HallCreate, session: AsyncSession = Depends(get_
     except IntegrityError:
         await session.rollback()
         raise HTTPException(status_code=409, detail="Зал с таким номером уже существует.")
+
+
+@router.patch("/halls/{hall_id}", response_model=sch.HallDetail, summary="[Вне MVP] Частично обновить зал")
+async def patch_hall(
+    data: sch.HallPatch, hall_id: int = Path(ge=1), session: AsyncSession = Depends(get_session)
+) -> sch.HallDetail:
+    hall = await crud.get_hall_orm(session, hall_id)
+    if hall is None:
+        raise HTTPException(status_code=404, detail="Зал не найден.")
+    try:
+        return await crud.patch_hall(session, hall, data)
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Зал с таким номером уже существует.")
+
+
+@router.post(
+    "/halls/{hall_id}/cover", response_model=sch.HallDetail, status_code=201,
+    summary="Загрузить обложку зала",
+    description=(
+        "Загрузка обложки зала (`multipart/form-data`, поле `file`). Лимиты: "
+        f"размер ≤ {settings.max_upload_mb} МБ, форматы JPEG / PNG / WebP. "
+        "URL объекта записывается в `cover_image_url` зала; отдельная миниатюра не генерируется."
+    ),
+)
+async def upload_hall_cover(
+    hall_id: int = Path(ge=1),
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+) -> sch.HallDetail:
+    hall = await crud.get_hall_orm(session, hall_id)
+    if hall is None:
+        raise HTTPException(status_code=404, detail="Зал не найден.")
+    data = await _read_validated_image(file)
+    old_cover = hall.cover_image_url
+    try:
+        stored = await storage.save_image(data, file.filename or "cover", file.content_type, prefix="halls")
+    except UpstreamError as exc:
+        raise HTTPException(status_code=502, detail=exc.message)
+    result = await crud.set_hall_cover(session, hall, stored.url)
+    # Старую обложку убираем из хранилища (best-effort), если её заменили на новую.
+    if old_cover and old_cover != stored.url:
+        await storage.delete_many([old_cover])
+    return result
 
 
 @router.post("/showcases", response_model=sch.ShowcaseDetail, status_code=201, summary="[Вне MVP] Создать витрину")
@@ -93,9 +165,30 @@ async def delete_exhibit(exhibit_id: int = Path(ge=1), session: AsyncSession = D
     await storage.delete_many(image_urls)
 
 
+@router.get(
+    "/exhibits/{exhibit_id}/media", response_model=list[sch.Image],
+    summary="Список фото экспоната (галерея)",
+    description="Возвращает галерею экспоната с `id` и `is_primary` для каждого фото (для удаления / выбора главной).",
+)
+async def list_media(
+    exhibit_id: int = Path(ge=1), session: AsyncSession = Depends(get_session)
+) -> list[sch.Image]:
+    if not await _exhibit_exists(session, exhibit_id):
+        raise HTTPException(status_code=404, detail="Экспонат не найден.")
+    images = await crud.list_exhibit_images(session, exhibit_id)
+    return [sch.Image.model_validate(i) for i in images]
+
+
 @router.post(
     "/exhibits/{exhibit_id}/media", response_model=sch.MediaUploadResponse, status_code=201,
-    summary="[Вне MVP] Загрузить фото экспоната",
+    summary="Загрузить фото экспоната",
+    description=(
+        "Загрузка фото экспоната (`multipart/form-data`: поле `file`, опционально `is_primary`). "
+        f"Лимиты: размер ≤ {settings.max_upload_mb} МБ, форматы JPEG / PNG / WebP. "
+        "Возвращает `image_id` (для последующего `DELETE .../media/{image_id}`). "
+        "`thumbnail_url` сейчас совпадает с `image_url` — отдельная миниатюра не генерируется. "
+        "При `is_primary=true` фото становится главным (`exhibits.image_url`)."
+    ),
 )
 async def upload_media(
     exhibit_id: int = Path(ge=1),
@@ -105,22 +198,20 @@ async def upload_media(
 ) -> sch.MediaUploadResponse:
     if not await _exhibit_exists(session, exhibit_id):
         raise HTTPException(status_code=404, detail="Экспонат не найден.")
-    if file.content_type not in _ALLOWED_IMG:
-        raise HTTPException(status_code=415, detail="Поддерживаются только JPEG, PNG и WebP.")
-    data = await file.read()
-    if len(data) > settings.max_upload_mb * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"Размер файла превышает {settings.max_upload_mb} МБ.")
+    data = await _read_validated_image(file)
     try:
         stored = await storage.save_image(data, file.filename or "image", file.content_type)
     except UpstreamError as exc:
         raise HTTPException(status_code=502, detail=exc.message)
-    await crud.add_exhibit_image(session, exhibit_id, stored.url, is_primary)
-    return sch.MediaUploadResponse(image_url=stored.url, thumbnail_url=stored.thumbnail_url, object_key=stored.object_key)
+    img = await crud.add_exhibit_image(session, exhibit_id, stored.url, is_primary)
+    return sch.MediaUploadResponse(
+        image_id=img.id, image_url=stored.url, thumbnail_url=stored.thumbnail_url, object_key=stored.object_key
+    )
 
 
 @router.delete(
     "/exhibits/{exhibit_id}/media/{image_id}", status_code=204,
-    summary="[Вне MVP] Удалить фото экспоната",
+    summary="Удалить фото экспоната",
 )
 async def delete_media(
     exhibit_id: int = Path(ge=1),
