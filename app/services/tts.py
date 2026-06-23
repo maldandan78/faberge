@@ -21,6 +21,43 @@ SPEECHKIT_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
 _CHARS_PER_SEC = 14.0  # грубая оценка темпа речи
 _CONTENT_TYPE = {"mp3": "audio/mpeg", "oggopus": "audio/ogg", "wav": "audio/wav"}
 
+# Поддерживаемые амплуа (роли) по голосам. В v1 REST параметр называется
+# `emotion`, но принимает именно значения амплуа из «Списка голосов» SpeechKit.
+# Нейтральное амплуа звучит «по-роботски»; тёплое (good/friendly) — человечнее.
+# Если запросить амплуа, которого у голоса нет, SpeechKit отвечает ошибкой,
+# поэтому здесь же — карта для безопасного фолбэка.
+VOICE_ROLES = {
+    "alena": {"neutral", "good"},
+    "filipp": {"neutral"},
+    "ermil": {"neutral", "good"},
+    "jane": {"neutral", "good", "evil"},
+    "omazh": {"neutral", "evil"},
+    "zahar": {"neutral", "good"},
+    "dasha": {"neutral", "good", "friendly"},
+    "lera": {"neutral", "friendly"},
+    "marina": {"neutral", "whisper", "friendly"},
+    "alexander": {"neutral", "good"},
+    "kirill": {"neutral", "strict", "good"},
+}
+# Приоритет «живости» при фолбэке: тёплое → дружелюбное → нейтральное.
+_WARM_PRIORITY = ("good", "friendly", "neutral")
+
+
+def _resolve_role(voice: str, requested: str) -> str:
+    """Подбирает ближайшее поддерживаемое голосом амплуа к запрошенному."""
+    supported = VOICE_ROLES.get(voice, {"neutral"})
+    if requested in supported:
+        return requested
+    for role in _WARM_PRIORITY:
+        if role in supported:
+            return role
+    return "neutral"
+
+
+def _cache_key(voice: str, text: str, role: str, speed: float, fmt: str) -> str:
+    raw = f"{voice}:{role}:{speed}:{fmt}:{text}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
 
 @dataclass
 class SpeechOutcome:
@@ -36,7 +73,7 @@ async def synthesize(
     voice: str = "alena",
     fmt: str = "mp3",
     speed: float = 1.0,
-    emotion: str = "neutral",
+    emotion: str = "good",
 ) -> SpeechOutcome:
     characters = len(text)
     if settings.tts_configured:
@@ -46,7 +83,7 @@ async def synthesize(
 
 def _synthesize_stub(text: str, voice: str, characters: int) -> SpeechOutcome:
     seconds = max(1.0, min(characters / _CHARS_PER_SEC, 12.0))  # ограничим файл 12 сек
-    key = hashlib.sha256(f"{voice}:{text}".encode("utf-8")).hexdigest()[:16]
+    key = _cache_key(voice, text, "stub", 1.0, "wav")
     rel = f"tts/{voice}_{key}.wav"
     out_dir = os.path.join(settings.media_dir, "tts")
     os.makedirs(out_dir, exist_ok=True)
@@ -76,14 +113,21 @@ async def _synthesize_yandex(
     text: str, voice: str, fmt: str, speed: float, emotion: str, characters: int
 ) -> SpeechOutcome:
     audio_format = "oggopus" if fmt == "oggopus" else ("lpcm" if fmt == "wav" else "mp3")
+    # `emotion` в v1 REST несёт амплуа голоса; приводим к поддерживаемому, чтобы
+    # тёплый дефолт (good) не ронял синтез на голосах, у которых его нет.
+    role = _resolve_role(voice, emotion)
     data = {
         "text": text,
         "voice": voice,
-        "emotion": emotion,
+        "emotion": role,
         "speed": str(speed),
         "format": audio_format,
         "lang": "ru-RU",
     }
+    # lpcm/oggopus отдаём в 48 кГц — иначе wav скатывается к «телефонному»,
+    # роботному звучанию. Для mp3 частота фиксирована и параметр игнорируется.
+    if audio_format in ("lpcm", "oggopus"):
+        data["sampleRateHertz"] = "48000"
     if settings.yandex_folder_id:
         data["folderId"] = settings.yandex_folder_id
     headers = {"Authorization": f"Api-Key {settings.speechkit_api_key or settings.yandex_api_key}"}
@@ -96,8 +140,9 @@ async def _synthesize_yandex(
         raise UpstreamError("Сервис озвучивания временно недоступен.") from exc
 
     # Кэшируем результат в Object Storage в проде (ссылка переживает смену
-    # экземпляра функции); локально, без бакета, — в media/.
-    key = hashlib.sha256(f"{voice}:{text}".encode("utf-8")).hexdigest()[:16]
+    # экземпляра функции); локально, без бакета, — в media/. Ключ включает
+    # амплуа/скорость/формат, иначе смена настроек отдавала бы старый файл.
+    key = _cache_key(voice, text, role, speed, fmt)
     rel = f"tts/{voice}_{key}.{fmt}"
     if settings.storage_configured:
         stored = await storage.save_bytes(

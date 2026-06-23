@@ -1,8 +1,8 @@
 type: http_request
 model: http_request
-id: rq_QV3KYwdF6B
-createdAt: 2026-06-01T15:43:40.890207
-updatedAt: 2026-06-17T08:47:57.477916
+id: rq_Qa9YZUgaA9
+createdAt: 2026-06-17T08:46:25.575107
+updatedAt: 2026-06-17T08:46:50.221546
 workspaceId: wk_JDtyNP6Jwb
 folderId: null
 authentication: {}
@@ -12,7 +12,7 @@ bodyType: null
 description: ''
 headers: []
 method: GET
-name: /exhibits
-sortPriority: -1780328510862.998
-url: ${[ BASE_URL ]}/exhibits?limit=100
+name: /exhibits Copy
+sortPriority: -1780328510862.997
+url: ${[ BASE_URL ]}/showcases?limit=3
 urlParameters: []
