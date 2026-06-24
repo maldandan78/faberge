@@ -38,3 +38,6 @@ htmlcov/
 
 # ── Локальная оснастка Claude (machine-specific launch.json) ──────────────
 .claude/
+
+# Сборочный артефакт Yandex Cloud Functions
+faberge-fn.zip

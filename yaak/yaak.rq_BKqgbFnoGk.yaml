@@ -2,13 +2,13 @@ type: http_request
 model: http_request
 id: rq_BKqgbFnoGk
 createdAt: 2026-06-01T15:45:30.498156
-updatedAt: 2026-06-01T15:45:44.143584
+updatedAt: 2026-06-23T18:37:18.140986
 workspaceId: wk_JDtyNP6Jwb
 folderId: null
 authentication: {}
 authenticationType: null
 body:
-  text: '{"exhibit_id": 101, "voice": "alena", "format": "mp3"}'
+  text: '{"exhibit_id": 102, "voice": "alena", "format": "mp3"}'
 bodyType: application/json
 description: ''
 headers:
