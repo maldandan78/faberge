@@ -16,6 +16,7 @@ import httpx
 
 from ..config import settings
 from . import UpstreamError, storage
+from .text_normalize import normalize_for_tts
 
 SPEECHKIT_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
 _CHARS_PER_SEC = 14.0  # грубая оценка темпа речи
@@ -75,6 +76,10 @@ async def synthesize(
     speed: float = 1.0,
     emotion: str = "good",
 ) -> SpeechOutcome:
+    # Чиним римские цифры («XIX век», «Александр III»), чтобы TTS не читал их
+    # по буквам. Делаем до подсчёта символов и кэш-ключа — на синтез уходит
+    # ровно тот текст, что и кэшируется.
+    text = normalize_for_tts(text)
     characters = len(text)
     if settings.tts_configured:
         return await _synthesize_yandex(text, voice, fmt, speed, emotion, characters)
