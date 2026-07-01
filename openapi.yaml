@@ -924,6 +924,35 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
+    delete:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Удалить зал'
+      description: >-
+        Удаляет зал. По умолчанию, если в зале есть витрины, возвращает `409` —
+        сначала опустошите зал или передайте `?force=true`. При `force=true`
+        каскадно удаляются витрины → экспонаты → их фото (включая объекты в
+        Object Storage) и обложка зала.
+      operationId: deleteHall
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/HallId'
+        - name: force
+          in: query
+          required: false
+          description: Каскадно удалить витрины, экспонаты и их медиа.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '204':
+          description: Зал удалён.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /admin/halls/{hall_id}/cover:
     post:
@@ -996,6 +1025,37 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
+  /admin/showcases/{showcase_id}:
+    delete:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Удалить витрину'
+      description: >-
+        Удаляет витрину. По умолчанию, если в витрине есть экспонаты, возвращает
+        `409` — сначала опустошите витрину или передайте `?force=true`. При
+        `force=true` каскадно удаляются экспонаты и их фото (включая объекты в
+        Object Storage).
+      operationId: deleteShowcase
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ShowcaseId'
+        - name: force
+          in: query
+          required: false
+          description: Каскадно удалить экспонаты и их медиа.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '204':
+          description: Витрина удалена.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /admin/exhibits:
     post:
       tags: [Администрирование]
@@ -1046,6 +1106,29 @@ paths:
           $ref: '#/components/responses/UnprocessableEntity'
 
   /admin/exhibits/{exhibit_id}:
+    get:
+      tags: [Администрирование]
+      summary: '[Вне MVP] Карточка экспоната для админки'
+      description: >-
+        Полная карточка экспоната, включая внутреннее поле `raw_history`
+        (факты для LLM), которое не отдаётся публичным `GET /exhibits/{id}`.
+        Нужна админке для просмотра/редактирования полного описания.
+      operationId: getExhibitAdmin
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ExhibitId'
+      responses:
+        '200':
+          description: Карточка экспоната (с `raw_history`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExhibitAdmin'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
       tags: [Администрирование]
       summary: '[Вне MVP] Полностью обновить экспонат'

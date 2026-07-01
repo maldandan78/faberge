@@ -101,6 +101,36 @@ async def upload_hall_cover(
     return result
 
 
+@router.delete(
+    "/halls/{hall_id}", status_code=204, summary="[Вне MVP] Удалить зал",
+    description=(
+        "Удаляет зал. По умолчанию, если в зале есть витрины, возвращает `409` — "
+        "сначала опустошите зал или передайте `?force=true`. При `force=true` "
+        "каскадно удаляются витрины → экспонаты → их фото (включая объекты в "
+        "Object Storage) и обложка зала."
+    ),
+)
+async def delete_hall(
+    hall_id: int = Path(ge=1),
+    force: bool = Query(False, description="Каскадно удалить витрины, экспонаты и их медиа."),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    hall = await crud.get_hall_orm(session, hall_id)
+    if hall is None:
+        raise HTTPException(status_code=404, detail="Зал не найден.")
+    showcase_count = await crud.count_hall_showcases(session, hall_id)
+    if showcase_count > 0 and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Зал не пуст: витрин — {showcase_count}. Передайте ?force=true для каскадного удаления.",
+        )
+    # URL медиа собираем ДО удаления строк (после каскада их уже не достать из БД).
+    image_urls = await crud.collect_hall_image_urls(session, hall_id)
+    await crud.delete_hall(session, hall_id)
+    # Чистим объекты хранилища после успешного удаления из БД (best-effort).
+    await storage.delete_many(image_urls)
+
+
 @router.post("/showcases", response_model=sch.ShowcaseDetail, status_code=201, summary="[Вне MVP] Создать витрину")
 async def create_showcase(data: sch.ShowcaseCreate, session: AsyncSession = Depends(get_session)) -> sch.ShowcaseDetail:
     if not await crud.hall_exists(session, data.hall_id):
@@ -112,6 +142,34 @@ async def create_showcase(data: sch.ShowcaseCreate, session: AsyncSession = Depe
         raise HTTPException(status_code=409, detail="Витрина с таким номером уже существует в этом зале.")
 
 
+@router.delete(
+    "/showcases/{showcase_id}", status_code=204, summary="[Вне MVP] Удалить витрину",
+    description=(
+        "Удаляет витрину. По умолчанию, если в витрине есть экспонаты, возвращает "
+        "`409` — сначала опустошите витрину или передайте `?force=true`. При "
+        "`force=true` каскадно удаляются экспонаты и их фото (включая объекты в "
+        "Object Storage)."
+    ),
+)
+async def delete_showcase(
+    showcase_id: int = Path(ge=1),
+    force: bool = Query(False, description="Каскадно удалить экспонаты и их медиа."),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    sc = await crud.get_showcase_orm(session, showcase_id)
+    if sc is None:
+        raise HTTPException(status_code=404, detail="Витрина не найдена.")
+    exhibit_count = await crud.count_showcase_exhibits(session, showcase_id)
+    if exhibit_count > 0 and not force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Витрина не пуста: экспонатов — {exhibit_count}. Передайте ?force=true для каскадного удаления.",
+        )
+    image_urls = await crud.collect_showcase_image_urls(session, showcase_id)
+    await crud.delete_showcase(session, showcase_id)
+    await storage.delete_many(image_urls)
+
+
 @router.post("/exhibits", response_model=sch.ExhibitAdmin, status_code=201, summary="[Вне MVP] Создать экспонат")
 async def create_exhibit(data: sch.ExhibitCreate, session: AsyncSession = Depends(get_session)) -> sch.ExhibitAdmin:
     if not await crud.showcase_exists(session, data.showcase_id):
@@ -121,6 +179,24 @@ async def create_exhibit(data: sch.ExhibitCreate, session: AsyncSession = Depend
     except IntegrityError:
         await session.rollback()
         raise HTTPException(status_code=409, detail="Экспонат с таким label_slug уже существует.")
+    return crud.to_exhibit(ex, admin=True)
+
+
+@router.get(
+    "/exhibits/{exhibit_id}", response_model=sch.ExhibitAdmin,
+    summary="[Вне MVP] Карточка экспоната для админки",
+    description=(
+        "Полная карточка экспоната, включая внутреннее поле `raw_history` "
+        "(факты для LLM), которое не отдаётся публичным `GET /exhibits/{id}`. "
+        "Нужна админке для просмотра/редактирования полного описания."
+    ),
+)
+async def get_exhibit_admin(
+    exhibit_id: int = Path(ge=1), session: AsyncSession = Depends(get_session)
+) -> sch.ExhibitAdmin:
+    ex = await crud.get_exhibit_orm(session, exhibit_id)
+    if ex is None:
+        raise HTTPException(status_code=404, detail="Экспонат не найден.")
     return crud.to_exhibit(ex, admin=True)
 
 

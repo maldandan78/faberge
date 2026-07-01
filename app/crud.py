@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, cast, delete as sa_delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -393,6 +393,64 @@ async def create_showcase(session: AsyncSession, data: sch.ShowcaseCreate) -> sc
     return result
 
 
+async def get_showcase_orm(session: AsyncSession, showcase_id: int) -> Optional[m.Showcase]:
+    return (await session.execute(select(m.Showcase).where(m.Showcase.id == showcase_id))).scalar_one_or_none()
+
+
+# ── Удаление залов / витрин (каскад + очистка медиа) ─────────────────────────
+async def count_hall_showcases(session: AsyncSession, hall_id: int) -> int:
+    return (await session.execute(select(func.count(m.Showcase.id)).where(m.Showcase.hall_id == hall_id))).scalar_one()
+
+
+async def count_showcase_exhibits(session: AsyncSession, showcase_id: int) -> int:
+    return (await session.execute(select(func.count(m.Exhibit.id)).where(m.Exhibit.showcase_id == showcase_id))).scalar_one()
+
+
+async def _exhibit_image_urls(session: AsyncSession, exhibit_ids_stmt, extra: Sequence[Optional[str]] = ()) -> List[str]:
+    """URL всех медиа (первичное фото + галерея + озвучка) для набора экспонатов (+ доп. URL, напр. обложка зала).
+
+    ``exhibit_ids_stmt`` — SELECT id экспонатов (подзапрос). Порядок URL не важен —
+    ``storage.delete_many`` сам дедуплицирует и пропускает пустые/внешние ссылки
+    (напр. ``model_3d_url`` на Koinovo — внешний, его не трогаем).
+    """
+    urls: List[str] = [u for u in extra if u]
+    # image_url + audio_url (предсинтезированная озвучка живёт в нашем бакете, см. tts.synthesize).
+    primary = await session.execute(select(m.Exhibit.image_url, m.Exhibit.audio_url).where(m.Exhibit.id.in_(exhibit_ids_stmt)))
+    for image_url, audio_url in primary.all():
+        if image_url:
+            urls.append(image_url)
+        if audio_url:
+            urls.append(audio_url)
+    gallery = await session.execute(select(m.ExhibitImage.url).where(m.ExhibitImage.exhibit_id.in_(exhibit_ids_stmt)))
+    urls += [r[0] for r in gallery.all()]
+    return urls
+
+
+async def collect_hall_image_urls(session: AsyncSession, hall_id: int) -> List[str]:
+    """Обложка зала + все изображения экспонатов во всех витринах зала — для очистки хранилища."""
+    cover = (await session.execute(select(m.Hall.cover_image_url).where(m.Hall.id == hall_id))).scalar_one_or_none()
+    ex_ids = select(m.Exhibit.id).join(m.Showcase, m.Exhibit.showcase_id == m.Showcase.id).where(m.Showcase.hall_id == hall_id)
+    return await _exhibit_image_urls(session, ex_ids, extra=[cover])
+
+
+async def collect_showcase_image_urls(session: AsyncSession, showcase_id: int) -> List[str]:
+    """Все изображения экспонатов витрины — для очистки хранилища."""
+    ex_ids = select(m.Exhibit.id).where(m.Exhibit.showcase_id == showcase_id)
+    return await _exhibit_image_urls(session, ex_ids)
+
+
+async def delete_hall(session: AsyncSession, hall_id: int) -> None:
+    # Core-DELETE: полагаемся на FK ON DELETE CASCADE (витрины → экспонаты → фото),
+    # чтобы не тянуть весь граф в ORM и не ловить async lazy-load.
+    await session.execute(sa_delete(m.Hall).where(m.Hall.id == hall_id))
+    await session.commit()
+
+
+async def delete_showcase(session: AsyncSession, showcase_id: int) -> None:
+    await session.execute(sa_delete(m.Showcase).where(m.Showcase.id == showcase_id))
+    await session.commit()
+
+
 async def create_exhibit(session: AsyncSession, data: sch.ExhibitCreate) -> m.Exhibit:
     ex = m.Exhibit(**data.model_dump())
     session.add(ex)
@@ -420,13 +478,16 @@ async def delete_exhibit(session: AsyncSession, ex: m.Exhibit) -> None:
 
 
 def collect_image_urls(ex: m.Exhibit) -> List[str]:
-    """Все URL изображений экспоната (первичное + галерея) — для очистки хранилища.
+    """Все URL медиа экспоната (первичное фото + галерея + озвучка) — для очистки хранилища.
 
     Требует, чтобы коллекция ``ex.images`` была уже загружена (см. ``_EXHIBIT_FULL``).
+    ``model_3d_url`` не включаем — это внешняя ссылка на Koinovo, не наш объект.
     """
     urls = [img.url for img in ex.images]
     if ex.image_url:
         urls.append(ex.image_url)
+    if ex.audio_url:
+        urls.append(ex.audio_url)
     return urls
 
 
