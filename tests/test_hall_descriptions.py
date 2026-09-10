@@ -338,7 +338,11 @@ def test_shipped_file_has_the_two_drawing_rooms_split():
         # «\n\n» — шов старой склейки. «<Название зала>. » в начале — вклеенный заголовок
         # места (тот же дефект импорта, что в п.4 ТЗ у экспоната id=458); отличаем его от
         # честного начала фразы «Рыцарский зал был отделан…» по точке с пробелом.
-        assert "\n\n" not in e.description, f"склейка осталась в «{e.name}»"
+        # Исключение — «Парадная лестница»: с 09.09.2026 её текст (с сайта музея) из шести
+        # абзацев намеренно, фронт рисует их через whitespace-pre-line. Её разметку
+        # проверяет test_staircase_description_covers_the_palace_and_the_museum.
+        if e.name != "Парадная лестница":
+            assert "\n\n" not in e.description, f"склейка осталась в «{e.name}»"
         assert not e.description.startswith(e.name + ". "), f"заголовок-префикс остался в «{e.name}»"
     # Тексты не перепутаны местами: у каждой гостиной свой герой из путеводителя.
     assert by_name["Белая гостиная"].description.startswith("Возрождение эмалевого дела")
@@ -361,14 +365,22 @@ def test_staircase_description_covers_the_palace_and_the_museum():
     by_name = {e.name: e for e in halls.load_entries(DESC_FILE)}
     text = by_name["Парадная лестница"].description
 
+    # «е/ё» не различаем: путеводитель пишет «Связь времен», сайт музея — «Связь времён».
+    plain = text.replace("ё", "е")
     for marker in ("Шуваловск", "Связь времен", "Фаберже"):
-        assert marker in text, f"из описания зала №1 пропало упоминание «{marker}»"
+        assert marker in plain, f"из описания зала №1 пропало упоминание «{marker}»"
     assert len(text) > 1361, "описание не длиннее старой справки про лестницу — вступление потерялось"
     # Абзац про саму лестницу никуда не делся: музей просил ДОБАВИТЬ рассказ, а не заменить.
     assert "Парадная лестница с колоннами" in text
+    # И стоит ПОСЛЕ рассказа: превью режется от начала текста, карточка зала не должна
+    # открываться справкой про перила.
+    assert text.index("Шуваловск") < text.index("Парадная лестница с колоннами")
 
-    # Общие правила файла (см. test_shipped_file_has_the_two_drawing_rooms_split) — тоже в силе.
-    assert "\n\n" not in text and "\n" not in text
+    # Абзацы (с 09.09.2026) разделены ровно «\n\n»: одиночный перевод строки фронт
+    # (whitespace-pre-line) нарисует как разрыв посреди абзаца.
+    paragraphs = text.split("\n\n")
+    assert "\n" not in "".join(paragraphs), "одиночный перевод строки внутри абзаца"
+    assert all(p.strip() == p and p for p in paragraphs), "пустой абзац или пробелы по краям"
     assert not text.startswith("Парадная лестница. ")
 
 
