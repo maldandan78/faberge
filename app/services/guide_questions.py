@@ -74,7 +74,38 @@ def _pool_size(max_questions: int) -> int:
     return max(max_questions, settings.guide_questions_cache_size)
 
 
-def _serve(questions: List[str], max_questions: int, exclude: Tuple[str, ...] = ()) -> List[str]:
+# Поля карточки, которые считаются «материалами» при сверке подсказок с
+# источником (просьба музея 16.09.2026, категория 1). Это НЕ то же самое, что
+# `llm.questions_source`: тот отдаёт один текст, из которого вопросы
+# генерировались (история или краткое описание), а здесь нужен весь предмет.
+# Иначе «Что ещё создал мастер Михаил Перхин?» — вопрос из `llm._questions_stub`,
+# на который карточка отвечает полем `master_name`, — вырезался бы как
+# неподтверждённый только потому, что имени мастера нет в тексте истории.
+_CARD_FIELDS: Tuple[str, ...] = (
+    "name", "master_name", "year_created", "material", "techniques", "short_description",
+)
+
+
+def card_source(exhibit: Optional[Dict]) -> str:
+    """Материалы карточки одной строкой — с ними сверяются подсказки.
+
+    Пустая строка (нет карточки вовсе) выключает сверку: `guide_style` в этом
+    случае ничего не режет, и наборы без экспоната — зал, список залов, общий
+    чат — проходят как раньше.
+    """
+    if not exhibit:
+        return ""
+    parts = [str(exhibit.get(field) or "").strip() for field in _CARD_FIELDS]
+    parts.append(llm.questions_source(exhibit))
+    return "\n".join(part for part in parts if part.strip())
+
+
+def _serve(
+    questions: List[str],
+    max_questions: int,
+    exclude: Tuple[str, ...] = (),
+    source: str = "",
+) -> List[str]:
     """Что реально уходит посетителю: снять запрещённые формулировки, потом срез.
 
     Фильтр стоит на ЧТЕНИИ, а не только на генерации, и это главная точка задачи
@@ -96,6 +127,12 @@ def _serve(questions: List[str], max_questions: int, exclude: Tuple[str, ...] = 
     `exclude` — формулировки, которых в подсказках быть не должно (уже заданные
     в этой сессии, уже получившие отказ по этому экспонату); наполняет его
     вызывающий код.
+
+    `source` — материалы карточки (`card_source`). С ними сверяются подсказки по
+    просьбе музея 16.09.2026: вопрос, называющий имя, год или исключительность,
+    которых в карточке нет, снимается, а вопрос о выборе материала, наоборот,
+    РАЗРЕШАЕТСЯ, если карточка этот выбор объясняет. Пустой источник обе проверки
+    выключает — на наборах без экспоната сверять не с чем.
     """
     return guide_style.clean_questions(
         questions,
@@ -103,6 +140,8 @@ def _serve(questions: List[str], max_questions: int, exclude: Tuple[str, ...] = 
         drop_meaningless=settings.guide_questions_filter,
         dedupe=settings.guide_questions_dedupe,
         exclude=exclude,
+        source=source,
+        require_support=settings.guide_questions_grounded,
     )
 
 
@@ -248,6 +287,9 @@ def select_questions(
 
     Ярусы — по одному послаблению каждый, сверху вниз:
 
+      0. (не ярус, а вход в каждый из них) все четыре набора проходят через
+         `_serve`, то есть через запреты музея и сверку с карточкой. Ярус 4 —
+         единственный без сверки, см. комментарий в коде;
       1. пул минус «уже спрошено» и «уже отказали» — обычный случай, ради
          которого всё и делается: пул перестаёт быть префиксом, и после ответа
          посетитель видит СЛЕДУЮЩИЕ вопросы, а не те же самые (п. II-2);
@@ -273,14 +315,20 @@ def select_questions(
         return []
     pool = [q for q in pool]
     both = tuple(asked) + tuple(refused)
-    picked = _serve(pool, max_questions, both)
+    # Источник — только для ярусов, которые говорят ОБ ЭТОМ предмете. Ярус 4
+    # (`MUSEUM_QUESTIONS`) идёт без него намеренно: «Чем знаменит Карл Фаберже?»
+    # и «Как появился Музей Фаберже?» называют имена, которых в карточке
+    # конкретного портсигара может не быть, — и последняя страховка от пустого
+    # блока (п. II-7) вырезала бы сама себя.
+    source = card_source(exhibit)
+    picked = _serve(pool, max_questions, both, source)
     if picked:
         return picked
     spare = fallback_questions(exhibit)
-    picked = _serve(spare, max_questions, both)
+    picked = _serve(spare, max_questions, both, source)
     if picked:
         return picked
-    picked = _serve(pool + spare, max_questions, tuple(refused))
+    picked = _serve(pool + spare, max_questions, tuple(refused), source)
     if picked:
         return picked
     return _serve(list(MUSEUM_QUESTIONS), max_questions, tuple(refused)) or list(MUSEUM_QUESTIONS)[:max_questions]
@@ -379,9 +427,10 @@ async def warm_exhibit(
     пул, чтобы отмена запрета не требовала перегенерации.
     """
     exhibit = crud.exhibit_to_dict(ex)
+    source = card_source(exhibit)
     want = _pool_size(0)
     if not force and is_fresh(row, exhibit, language):
-        return "cached", _serve(list(row.questions), want)
+        return "cached", _serve(list(row.questions), want, source=source)
     if dry_run:
         return "planned", []
     try:
@@ -394,4 +443,4 @@ async def warm_exhibit(
     await crud.save_exhibit_questions(
         session, ex.id, language, questions, fingerprint(exhibit, language), model
     )
-    return "generated", _serve(questions, want)
+    return "generated", _serve(questions, want, source=source)
