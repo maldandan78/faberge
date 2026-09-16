@@ -129,6 +129,7 @@ python scripts/recognition_coverage.py --from-seed db/seed_fabergemuseum.sql  # 
 | Вопросы-подсказки берутся из БД, а не считаются заново: они зависят только от карточки экспоната (26.08.2026) | `services/guide_questions.py`, таблица `exhibit_questions` | `GUIDE_QUESTIONS_CACHE_ENABLED`, `GUIDE_QUESTIONS_CACHE_SIZE` |
 | Запрещённые музеем формулировки снимаются детерминированно: вопросы «почему выбрали именно этот материал» и «сколько времени заняло создание», перефразировки одного вопроса, обороты-«вода» в рассказе (31.08.2026) | `services/guide_style.py` | `GUIDE_QUESTIONS_FILTER`, `GUIDE_QUESTIONS_DEDUPE`, `GUIDE_STORY_FILLER_FILTER` |
 | Подсказка сверяется с карточкой (16.09.2026): вопрос с именем, годом или «единственный», которых в материалах нет, снимается; вопрос о выборе материала, наоборот, разрешается, если карточка этот выбор объясняет | `guide_style.is_unsupported_question`, `guide_questions.card_source` | `GUIDE_QUESTIONS_GROUNDED` |
+| Вопрос, который посетитель ввёл сам, на запрещённую музеем тему (выбор материала мастером, бытовое назначение, сроки изготовления, неподтверждённое «единственный») в модель не уходит: ответ — заглушка, реплика пишется с причиной `blocked_topic` (16.09.2026) | `guide_style.is_blocked_visitor_question`, `routers/guide.chat` | `GUIDE_BLOCK_BANNED_QUESTIONS`, `GUIDE_BLOCKED_ANSWER` |
 | Расход в логах: строка на каждый вызов | `llm._log_usage`, `tts._synthesize_yandex` | `LLM_LOG_USAGE=true` |
 
 Строки расхода (уровень `INFO`) грепаются в логах функции:

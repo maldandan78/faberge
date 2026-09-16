@@ -713,9 +713,11 @@ class AnalyticsUnansweredItem(BaseModel):
     count: int
     variants: List[str] = Field(default_factory=list)
     # Сколько раз каждая причина:
-    # no_context | llm_refusal | llm_hedge | not_found | error.
+    # no_context | llm_refusal | llm_hedge | not_found | error | blocked_topic.
     # `llm_hedge` (31.08.2026) — ответ по существу с оговоркой «этого точно не
     # знаю»; в отличие от `llm_refusal` он НЕ прячет вопрос из подсказок гида.
+    # `blocked_topic` (16.09.2026) — вопрос из запрещённых музеем тем, модель не
+    # вызывалась, посетитель получил заглушку.
     fail_reasons: Dict[str, int] = Field(default_factory=dict)
     # Экспонаты, у карточек которых задавали эти вопросы — там и не хватает описания.
     exhibits: List[AnalyticsTopItem] = Field(default_factory=list)
