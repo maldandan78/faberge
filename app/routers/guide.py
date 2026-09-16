@@ -20,7 +20,7 @@ from ..db import get_session
 # `location` (поле ответа гида), и под родным именем модуль оказался бы затенён
 # во всей функции целиком — обращение к нему падало бы `UnboundLocalError` на
 # каждом запросе `/guide/chat`, в том числе ДО строки её присваивания.
-from ..services import UpstreamError, guide_intel, guide_mentions, guide_questions, llm, tts
+from ..services import UpstreamError, guide_intel, guide_mentions, guide_questions, guide_style, llm, tts
 from ..services import location as location_text
 
 router = APIRouter(prefix="/guide", tags=["ИИ-гид"])
@@ -271,6 +271,29 @@ async def _exhibit_suggestions(
         )
 
 
+async def _dialogue_suggestions(
+    session: AsyncSession,
+    exhibit_dict: Optional[dict],
+    context_hall: Optional[m.Hall],
+    req: sch.ChatRequest,
+    asked: SessionMemory,
+    refused: SessionMemory,
+) -> List[str]:
+    """Подсказки под репликой диалога — по экспонату, по залу или общие про музей.
+
+    Одна функция на обе ветки, где гид отвечает текстом (модель и заглушка на
+    запрещённую тему): блок подсказок под ними обязан собираться одинаково, иначе
+    «попробуйте другой вопрос» предлагало бы не то, что обычный ответ.
+    """
+    if exhibit_dict is not None:
+        return await _exhibit_suggestions(
+            session, exhibit_dict, req.max_questions, req.language, asked, refused
+        )
+    if context_hall is not None:
+        return guide_questions.hall_questions(req.max_questions, exclude=_scoped(asked))
+    return guide_questions.museum_questions(req.max_questions, exclude=_scoped(asked))
+
+
 @router.post("/story", response_model=sch.StoryResponse, summary="Сгенерировать рассказ об экспонате")
 async def generate_story(req: sch.StoryRequest, session: AsyncSession = Depends(get_session)) -> sch.StoryResponse:
     if req.exhibit_id is None and not req.label_slug:
@@ -374,6 +397,11 @@ def _is_blank_context(context: Optional[sch.GuideContext]) -> bool:
         "* заполненный `context` — заменяет контекст сессии целиком.\n\n"
         "Контекст зала — подсказка, а не рамка: если ответа в нём нет, гид отвечает "
         "по общим знаниям о музее, а не «в предоставленных материалах нет информации».\n\n"
+        "Вопросы на темы, которые музей просил не обсуждать (почему мастер выбрал "
+        "именно этот материал, для чего использовалась вещь, сколько времени заняло "
+        "изготовление, неподтверждённое «единственный»), модель не получают: в `answer` "
+        "приходит заглушка (`GUIDE_BLOCKED_ANSWER`), `suggested_questions` заполнен "
+        "как обычно. Выключается `GUIDE_BLOCK_BANNED_QUESTIONS=false`.\n\n"
         "Блок `suggested_questions` при `max_questions > 0` непустой в любой ветке: "
         "он не повторяет вопросы, уже заданные в этой сессии, и вопросы, на которые "
         "гид отказался отвечать по этому экспонату, а если после исключений пул "
@@ -533,6 +561,31 @@ async def chat(req: sch.ChatRequest, session: AsyncSession = Depends(get_session
         questions = guide_questions.halls_overview_questions(
             [(h.hall_number, h.name) for h in halls], req.max_questions, exclude=_scoped(asked)
         )
+    elif settings.guide_block_banned_questions and guide_style.is_blocked_visitor_question(
+        req.message,
+        guide_questions.card_source(exhibit_dict) if exhibit_dict is not None else grounding,
+    ):
+        # Вопрос из тем, которые музей просил не обсуждать (16.09.2026): выбор
+        # материала мастером, бытовое назначение вещи, сроки изготовления,
+        # неподтверждённая исключительность. Модель не зовём — ответ заглушкой,
+        # и сразу под ним блок подсказок, чтобы «попробуйте другой вопрос» было
+        # из чего выбрать.
+        #
+        # Ветка стоит ПОСЛЕ поиска по номеру и списка залов: те отвечают
+        # структурой каталога и под запрет попасть не могут. Плашка контекстного
+        # экспоната остаётся (посетитель стоит у него), поиска упоминаний нет —
+        # упоминать нечего.
+        #
+        # Причина `blocked_topic` — своя, а не `llm_refusal`: модель не
+        # отказывалась, отказали мы. В глобальную память отказов (решение Д8) она
+        # не входит — подсказки с этими темами и так снимаются шаблонами на
+        # выдаче, а засорять память, построенную на поведении модели, нечем.
+        answer = settings.guide_blocked_answer
+        answered, fail_reason = False, "blocked_topic"
+        referenced_exhibits = _merge_referenced(context_exhibit, [])
+        questions = await _dialogue_suggestions(
+            session, exhibit_dict, context_hall, req, asked, refused
+        )
     else:
         # Обычный диалог: LLM-ответ + retrieval-обвязка (B6/B7).
         try:
@@ -550,14 +603,7 @@ async def chat(req: sch.ChatRequest, session: AsyncSession = Depends(get_session
         # («после ответа варианты вопросов уже не предлагаются»). Сценарии 3 и 4:
         # контекст только зала и общий чат без контекста получают
         # детерминированные наборы — без LLM, без кэша и без риска отказа.
-        if exhibit_dict is not None:
-            questions = await _exhibit_suggestions(
-                session, exhibit_dict, req.max_questions, req.language, asked, refused
-            )
-        elif context_hall is not None:
-            questions = guide_questions.hall_questions(req.max_questions, exclude=_scoped(asked))
-        else:
-            questions = guide_questions.museum_questions(req.max_questions, exclude=_scoped(asked))
+        questions = await _dialogue_suggestions(session, exhibit_dict, context_hall, req, asked, refused)
         # B6 — экспонаты, о которых речь. Кандидатов берём с ЗАПАСОМ (окно, а не
         # четвёрка): полнотекстовый поиск ранжирует по ts_rank, а вес D у
         # raw_history поднимает длинные истории выше карточки, которую гид назвал

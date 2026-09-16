@@ -203,7 +203,7 @@ class GuideMessage(Base):
         CheckConstraint("role IN ('user','assistant','system')", name="guide_messages_role_chk"),
         CheckConstraint(
             "fail_reason IS NULL OR fail_reason IN "
-            "('no_context','llm_refusal','llm_hedge','not_found','error')",
+            "('no_context','llm_refusal','llm_hedge','not_found','error','blocked_topic')",
             name="guide_messages_fail_reason_chk",
         ),
     )
@@ -221,11 +221,14 @@ class GuideMessage(Base):
     # Пишется на ОБЕ строки пары (вопрос и ответ): отчёт «вопросы без ответа»
     # читает role='user' без self-join.
     answered: Mapped[Optional[bool]] = mapped_column(Boolean)
-    # Причина неудачи. Две из пяти — 'llm_refusal' и 'no_context' — кормят не
+    # Причина неудачи. Две из шести — 'llm_refusal' и 'no_context' — кормят не
     # только отчёт, но и глобальную память отказов (`crud.exhibit_refused_questions`,
     # решение Д8): вопрос с такой причиной перестаёт предлагаться ВСЕМ посетителям
     # экспоната. Поэтому содержательный ответ с оговоркой «этого точно не знаю»
     # получает отдельную причину 'llm_hedge' — она в ту выборку не входит.
+    # 'blocked_topic' (16.09.2026) — модель не вызывалась вовсе: посетитель ввёл
+    # вопрос из запрещённых музеем тем и получил заглушку. В память отказов тоже
+    # не входит.
     fail_reason: Mapped[Optional[str]] = mapped_column(String(32))
     # Контекст вопроса — у какого экспоната/зала спрашивали (для привязки отчёта).
     exhibit_id: Mapped[Optional[int]] = mapped_column(Integer)

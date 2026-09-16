@@ -216,8 +216,10 @@ CREATE TABLE IF NOT EXISTS guide_messages (
     -- отдельная причина нужна потому, что 'llm_refusal'/'no_context' кормят
     -- глобальную память отказов (app/crud.py: exhibit_refused_questions) и
     -- прячут вопрос из подсказок у всех посетителей — см. guide_intel.is_hard_refusal.
+    -- 'blocked_topic' (16.09.2026) — модель не вызывалась: вопрос из запрещённых
+    -- музеем тем получил заглушку (guide_style.is_blocked_visitor_question).
     fail_reason VARCHAR(32) CHECK (fail_reason IS NULL OR fail_reason IN
-                     ('no_context', 'llm_refusal', 'llm_hedge', 'not_found', 'error')),
+                     ('no_context', 'llm_refusal', 'llm_hedge', 'not_found', 'error', 'blocked_topic')),
     -- Контекст вопроса: у какого экспоната/зала посетитель спрашивал.
     exhibit_id  INT,
     hall_id     INT,
@@ -251,7 +253,7 @@ ALTER TABLE guide_messages ADD COLUMN IF NOT EXISTS hall_id     INT;
 ALTER TABLE guide_messages DROP CONSTRAINT IF EXISTS guide_messages_fail_reason_chk;
 ALTER TABLE guide_messages ADD CONSTRAINT guide_messages_fail_reason_chk
     CHECK (fail_reason IS NULL OR fail_reason IN
-           ('no_context', 'llm_refusal', 'llm_hedge', 'not_found', 'error'));
+           ('no_context', 'llm_refusal', 'llm_hedge', 'not_found', 'error', 'blocked_topic'));
 ALTER TABLE events ADD COLUMN IF NOT EXISTS showcase_id INT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS device_id   UUID;
 
