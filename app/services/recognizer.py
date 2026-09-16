@@ -125,12 +125,18 @@ def _recognize_stub(image: bytes, known_slugs: Sequence[str], top_k: int) -> Rec
     confidence = round(0.45 + (h % 55) / 100.0, 2)  # 0.45..0.99
     idx = h % len(known_slugs)
     primary = known_slugs[idx]
-    if confidence >= settings.recognition_confidence_threshold:
-        return RecognitionOutcome(True, primary, confidence, [(primary, confidence)])
-    candidates: List[Tuple[str, float]] = []
-    for i in range(min(top_k, len(known_slugs))):
-        candidates.append((known_slugs[(idx + i) % len(known_slugs)], round(max(0.05, confidence - i * 0.08), 2)))
-    return RecognitionOutcome(False, None, confidence, candidates)
+    # Список кандидатов строим всегда — и при уверенном ответе тоже: следующие по
+    # вероятности варианты нужны фронту, чтобы показать «другие варианты» рядом с
+    # найденным. Реальный ML-адаптер ведёт себя так же, стаб не должен отличаться
+    # формой ответа, иначе экран, отлаженный на стабе, на проде выглядит иначе.
+    candidates: List[Tuple[str, float]] = [
+        (known_slugs[(idx + i) % len(known_slugs)], round(max(0.05, confidence - i * 0.08), 2))
+        for i in range(min(top_k, len(known_slugs)))
+    ]
+    recognized = confidence >= settings.recognition_confidence_threshold
+    return RecognitionOutcome(
+        recognized, primary if recognized else None, confidence, candidates
+    )
 
 
 async def _recognize_search(
@@ -148,12 +154,16 @@ async def _recognize_search(
     каталоге («Портсигар» ×12) сворачиваются в один экспонат (см.
     crud.slug_by_name) — поэтому дедуп по slug.
     """
+    # Просим с запасом: ниже мы схлопываем ракурсы одного предмета по slug и
+    # выбрасываем названия, не сшитые с каталогом, — при limit=top_k до ответа
+    # доезжал один вариант вместо трёх (см. recognition_search_limit).
+    search_limit = max(top_k, settings.recognition_search_limit)
     try:
         async with httpx.AsyncClient(timeout=settings.recognition_timeout_sec) as client:
             resp = await client.post(
                 settings.yolo_endpoint,  # type: ignore[arg-type]
                 files={"file": ("photo.jpg", image, "application/octet-stream")},
-                data={"limit": str(top_k)},
+                data={"limit": str(search_limit)},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -164,8 +174,8 @@ async def _recognize_search(
     predictions = data.get("predictions") or []
     # Диагностика прода: без сырого ответа чинить сшивку вслепую невозможно.
     logger.info(
-        "recognition: получено предсказаний=%d, found=%s, каталог=%d названий, сырые=%s",
-        len(predictions), data.get("found"), len(name_to_slug),
+        "recognition: получено предсказаний=%d (limit=%d), found=%s, каталог=%d названий, сырые=%s",
+        len(predictions), search_limit, data.get("found"), len(name_to_slug),
         [(p.get("item_id"), p.get("title"), p.get("confidence")) for p in predictions],
     )
 
