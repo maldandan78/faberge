@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import wave
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -39,6 +40,72 @@ _CHARS_PER_SEC = 14.0  # грубая оценка темпа речи (фолб
 _CONTENT_TYPE = {"mp3": "audio/mpeg", "oggopus": "audio/ogg", "wav": "audio/wav"}
 # Контейнер аудио в v3 задаётся перечислением, а не строкой формата из v1.
 _V3_CONTAINER = {"mp3": "MP3", "oggopus": "OGG_OPUS", "wav": "WAV"}
+
+# Предел длины ОДНОГО запроса v3 — документированный: «250 символов и 24 секунды
+# на синтезируемую фразу». Замер на проде 02.09.2026 совпал с документацией с
+# точностью до знака: 249 синтезируется, 250 — стабильный отказ (быстрый, ~300 мс,
+# то есть ошибка сервиса, а не таймаут). Наружу это выглядело как «Сервис
+# озвучивания временно недоступен» на КАЖДОМ рассказе гида: рассказ у нас 300–600
+# знаков, то есть с переезда на v3 (19.08.2026) кнопка «Прослушать» под рассказом
+# не работала вовсе, а короткие подписи работали — потому баг и не был виден.
+# Число вынесено в настройку на случай, если предел сервиса изменится.
+_V3_LIMIT_FALLBACK = 249
+# Вторая половина предела — 24 секунды звука на фразу. По знакам мы в него
+# укладываемся (249 знаков ≈ 18 с в темпе 1.0), но на замедленной речи — уже нет,
+# поэтому на speed < 1 предел по знакам ужимается пропорционально.
+_V3_MAX_SECONDS = 24.0
+
+_SENTENCE_RE = re.compile(r"[^.!?…]+(?:[.!?…]+|$)")
+
+
+def v3_chunk_limit() -> int:
+    return getattr(settings, "speechkit_v3_max_chars", None) or _V3_LIMIT_FALLBACK
+
+
+def split_for_v3(text: str, limit: Optional[int] = None) -> List[str]:
+    """Разбить текст на куски не длиннее предела, по границам предложений.
+
+    Рвать на полуслове нельзя: синтез читает кусок как самостоятельную фразу, и
+    интонация на обрыве слышна. Поэтому режем по предложениям, а слишком длинное
+    предложение — по словам (и только совсем уж длинное «слово» — жёстко).
+    """
+    limit = limit or v3_chunk_limit()
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return [text] if text else []
+
+    pieces: List[str] = []
+    for sentence in (m.group(0).strip() for m in _SENTENCE_RE.finditer(text)):
+        if not sentence:
+            continue
+        if len(sentence) <= limit:
+            pieces.append(sentence)
+            continue
+        current = ""
+        for word in sentence.split():
+            while len(word) > limit:            # одно «слово» длиннее предела
+                if current:
+                    pieces.append(current)
+                    current = ""
+                pieces.append(word[:limit])
+                word = word[limit:]
+            candidate = f"{current} {word}".strip()
+            if len(candidate) > limit:
+                pieces.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            pieces.append(current)
+
+    chunks: List[str] = []
+    for piece in pieces:
+        if chunks and len(chunks[-1]) + 1 + len(piece) <= limit:
+            chunks[-1] = f"{chunks[-1]} {piece}"
+        else:
+            chunks.append(piece)
+    return chunks
+
 
 # Поддерживаемые амплуа (роли) по голосам. В v1 REST параметр называется
 # `emotion`, но принимает именно значения амплуа из «Списка голосов» SpeechKit.
@@ -180,8 +247,9 @@ async def _synthesize_yandex(
     # ронял синтез на голосах, у которых его нет.
     role = _resolve_role(voice, emotion)
     duration_ms: Optional[int] = None
+    requests = 1
     if settings.speechkit_v3:
-        audio_bytes, duration_ms = await _fetch_v3(text, voice, fmt, speed, role)
+        audio_bytes, duration_ms, requests = await _fetch_v3(text, voice, fmt, speed, role)
     else:
         audio_bytes = await _fetch_v1(text, voice, fmt, speed, role)
     if duration_ms is None:
@@ -206,10 +274,13 @@ async def _synthesize_yandex(
     # Строка расхода на синтез. В v3 тарификация по ЗАПРОСАМ, поэтому в логе
     # важно и число символов (чтобы видеть, что мы не шлём простыни), и сам факт
     # запроса: одна строка = один платный вызов.
+    # `requests` — сколько ПЛАТНЫХ вызовов ушло: в v3 длинный текст режется на
+    # куски, и одна строка лога больше не равна одному запросу. Считать расход
+    # по числу строк, как раньше, теперь нельзя — отсюда отдельное поле.
     logger.info(
-        "tts_request api=%s voice=%s role=%s fmt=%s chars=%s duration_ms=%s bytes=%s",
+        "tts_request api=%s voice=%s role=%s fmt=%s chars=%s duration_ms=%s bytes=%s requests=%s",
         "v3" if settings.speechkit_v3 else "v1",
-        voice, role, fmt, characters, duration_ms, len(audio_bytes),
+        voice, role, fmt, characters, duration_ms, len(audio_bytes), requests,
     )
     return SpeechOutcome(
         audio_url=audio_url,
@@ -227,6 +298,27 @@ def _auth_headers(with_folder: bool = True) -> dict:
     if with_folder and settings.yandex_folder_id:
         headers["x-folder-id"] = settings.yandex_folder_id
     return headers
+
+
+def _log_synthesis_failure(api: str, exc: Exception) -> None:
+    """Записать ПРИЧИНУ провала синтеза: наружу-то уходит одна общая фраза.
+
+    Замер расхода 02.09.2026 поймал на проде 36 подряд ответов 502 «Сервис
+    озвучивания временно недоступен», а в логах функции про них не было ни
+    строки: обе ветки (`_fetch_v1`/`_fetch_v3`) заворачивали любое исключение в
+    UpstreamError молча. Отличить «SpeechKit ответил 403» от «не резолвится
+    хост» снаружи невозможно, а решения это требует разных. Тело ответа берём
+    коротким куском — в нём лежит сообщение Yandex, ради которого всё и
+    затевалось; заголовки (там ключ) не логируем никогда.
+    """
+    detail = str(exc)[:200].replace("\n", " ")
+    status = ""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status = f" status={getattr(response, 'status_code', '-')}"
+        body = (getattr(response, "text", "") or "")[:300].replace("\n", " ")
+        detail = f"{detail} body={body}"
+    logger.warning("tts_failed api=%s error=%s%s detail=%s", api, type(exc).__name__, status, detail)
 
 
 async def _fetch_v1(text: str, voice: str, fmt: str, speed: float, role: str) -> bytes:
@@ -252,10 +344,12 @@ async def _fetch_v1(text: str, voice: str, fmt: str, speed: float, role: str) ->
             resp.raise_for_status()
             return resp.content
     except Exception as exc:  # noqa: BLE001
+        _log_synthesis_failure("v1", exc)
         raise UpstreamError("Сервис озвучивания временно недоступен.") from exc
 
 
-def _v3_payload(text: str, voice: str, fmt: str, speed: float, role: str) -> dict:
+def _v3_payload(text: str, voice: str, fmt: str, speed: float, role: str,
+                unsafe_mode: bool = False) -> dict:
     """Тело запроса v3.
 
     Отличия от v1, из-за которых понадобился отдельный путь: параметры голоса
@@ -267,12 +361,21 @@ def _v3_payload(text: str, voice: str, fmt: str, speed: float, role: str) -> dic
     hints: List[dict] = [{"voice": voice}, {"role": role}]
     if speed and speed != 1.0:
         hints.append({"speed": float(speed)})
-    return {
+    payload = {
         "text": text,
         "hints": hints,
         "outputAudioSpec": {"containerAudio": {"containerAudioType": _V3_CONTAINER.get(fmt, "MP3")}},
         "loudnessNormalizationType": "LUFS",
     }
+    if unsafe_mode:
+        # Штатная опция сервиса: «Automatically split long text to several
+        # utterances and bill accordingly. Some degradation in service quality is
+        # possible» (proto UtteranceSynthesisRequest.unsafe_mode). Деньги те же,
+        # что при нашем разбиении — платят за фразы; выигрыш в том, что ответ
+        # приходит ОДНИМ потоком, то есть контейнер собирает сам SpeechKit.
+        # Поэтому она нужна там, где склеить куски нельзя: wav/ogg.
+        payload["unsafeMode"] = True
+    return payload
 
 
 def _iter_v3_messages(body: str) -> Iterator[dict]:
@@ -334,18 +437,62 @@ def _parse_v3_stream(body: str) -> Tuple[bytes, Optional[int]]:
 
 async def _fetch_v3(
     text: str, voice: str, fmt: str, speed: float, role: str
+) -> Tuple[bytes, Optional[int], int]:
+    """Синтез через API v3. Возвращает (аудио, длительность, число запросов).
+
+    Длинный текст (сверх документированных 250 знаков / 24 с на фразу) идёт
+    двумя разными путями, и разница не в цене — платят в обоих случаях за фразы:
+
+    - mp3 — НАШИМ разбиением по границам предложений: куски склеиваются
+      конкатенацией кадров, и мы сами решаем, где рвать. Пауза приходится на
+      конец предложения, а не на середину придаточного;
+    - wav/ogg — штатным `unsafe_mode`: их куски склеивать нельзя (у каждого свой
+      заголовок/поток), а сервис отдаёт цельный контейнер. Если и это не вышло —
+      откат на v1, у которого предел на порядок выше.
+    """
+    limit = v3_chunk_limit()
+    if speed and speed < 1.0:
+        # 24 секунды на фразу — вторая половина предела; на замедленной речи в
+        # неё упирается более короткий текст.
+        limit = max(1, int(limit * speed))
+    chunks = split_for_v3(text, limit)
+    if len(chunks) > 1:
+        if fmt != "mp3":
+            try:
+                audio, duration_ms = await _fetch_v3_once(text, voice, fmt, speed, role, unsafe_mode=True)
+                return audio, duration_ms, len(chunks)
+            except UpstreamError:
+                return await _fetch_v1(text, voice, fmt, speed, role), None, 1
+        audio = b""
+        total_ms = 0
+        known_duration = False
+        for chunk in chunks:
+            part, duration_ms = await _fetch_v3_once(chunk, voice, fmt, speed, role)
+            audio += part
+            if duration_ms:
+                total_ms += duration_ms
+                known_duration = True
+        return audio, (total_ms if known_duration else None), len(chunks)
+    audio, duration_ms = await _fetch_v3_once(chunks[0] if chunks else text, voice, fmt, speed, role)
+    return audio, duration_ms, 1
+
+
+async def _fetch_v3_once(
+    text: str, voice: str, fmt: str, speed: float, role: str, unsafe_mode: bool = False
 ) -> Tuple[bytes, Optional[int]]:
-    """Синтез через API v3 (тарификация по запросам)."""
+    """Один HTTP-запрос к v3. С `unsafe_mode` сервис сам режет длинный текст."""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                SPEECHKIT_V3_URL, headers=_auth_headers(), json=_v3_payload(text, voice, fmt, speed, role)
+                SPEECHKIT_V3_URL, headers=_auth_headers(),
+                json=_v3_payload(text, voice, fmt, speed, role, unsafe_mode)
             )
             resp.raise_for_status()
             audio_bytes, duration_ms = _parse_v3_stream(resp.text)
     except UpstreamError:
         raise
     except Exception as exc:  # noqa: BLE001
+        _log_synthesis_failure("v3", exc)
         raise UpstreamError("Сервис озвучивания временно недоступен.") from exc
     if not audio_bytes:
         # 200 без единого audioChunk — ошибка формата запроса или пустой ответ.

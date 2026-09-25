@@ -358,6 +358,154 @@ def test_tts_request_is_logged():
     assert "api=v3" in line and "chars=5" in line and "duration_ms=1200" in line
 
 
+
+# ── 6. Предел длины запроса v3 ──────────────────────────────────────────────
+LONG_STORY = (
+    "Перед вами предмет из собрания музея, мастер работал с эмалью и золотом. "
+    "Каждая деталь тут продумана, от крышки до узора по краю, а переход цвета "
+    "получается за счёт нескольких слоёв прозрачной эмали. Такие вещи заказывали "
+    "для подарков и хранили в семье десятилетиями, передавая по наследству. "
+    "Мастерская славилась вниманием к мелочам и умением соединять материалы."
+)
+
+
+def test_short_text_stays_one_request():
+    assert tts.split_for_v3("Короткая подпись.", 249) == ["Короткая подпись."]
+    assert tts.split_for_v3("", 249) == []
+
+
+def test_long_text_is_split_within_the_limit():
+    """Замер 02.09.2026: 249 знаков синтезируются, 250 — отказ. Куски обязаны влезать."""
+    chunks = tts.split_for_v3(LONG_STORY, 249)
+    assert len(chunks) > 1
+    assert all(len(c) <= 249 for c in chunks), [len(c) for c in chunks]
+    assert " ".join(chunks).split() == LONG_STORY.split(), "текст не должен потеряться при разбиении"
+
+
+def test_split_does_not_break_words():
+    """Рвать на полуслове нельзя: кусок читается как самостоятельная фраза."""
+    sentence = "слово " * 120                       # одно предложение длиннее предела
+    chunks = tts.split_for_v3(sentence.strip(), 50)
+    assert all(len(c) <= 50 for c in chunks)
+    assert all(not c.startswith(" ") and "  " not in c for c in chunks)
+    assert set(" ".join(chunks).split()) == {"слово"}
+
+
+def test_long_mp3_goes_in_several_requests_and_is_glued():
+    response = FakeResponse(text=v3_stream(b"audio", length_ms=1000))
+    with patched(tts, response, speechkit_api_version="v3", yandex_api_key="k",
+                 speechkit_api_key="sk", yandex_folder_id="f", speechkit_v3_max_chars=249,
+                 object_storage_bucket=None, media_dir=tempfile.mkdtemp()) as calls:
+        with collected(tts.logger) as messages:
+            outcome = asyncio.run(
+                tts._synthesize_yandex(LONG_STORY, "alena", "mp3", 1.0, "good", len(LONG_STORY))
+            )
+    expected = len(tts.split_for_v3(LONG_STORY, 249))
+    assert expected > 1
+    assert len(calls) == expected, "длинный рассказ обязан уйти несколькими запросами"
+    assert outcome.duration_ms == 1000 * expected, "длительность складывается из кусков"
+    line = next(m for m in messages if m.startswith("tts_request"))
+    assert f"requests={expected}" in line, "число платных запросов должно быть видно в логе"
+    assert f"chars={len(LONG_STORY)}" in line
+
+
+def test_long_wav_uses_unsafe_mode_not_our_glue():
+    """WAV кусками склеить нельзя — просим сервис разрезать самому (unsafe_mode)."""
+    response = FakeResponse(text=v3_stream(b"wav-bytes", length_ms=9000))
+    with patched(tts, response, speechkit_api_version="v3", yandex_api_key="k",
+                 speechkit_api_key="sk", yandex_folder_id="f", speechkit_v3_max_chars=249,
+                 object_storage_bucket=None, media_dir=tempfile.mkdtemp()) as calls:
+        outcome = asyncio.run(
+            tts._synthesize_yandex(LONG_STORY, "alena", "wav", 1.0, "good", len(LONG_STORY))
+        )
+    assert [c["url"] for c in calls] == [tts.SPEECHKIT_V3_URL], "должен быть ОДИН запрос, а не склейка"
+    assert calls[0]["json"]["unsafeMode"] is True
+    assert calls[0]["json"]["text"] == LONG_STORY, "режет сервис, значит текст уходит целиком"
+    assert outcome.fmt == "wav"
+
+
+def test_long_wav_falls_back_to_v1_if_unsafe_mode_fails():
+    """Если и unsafe_mode не сработал — остаётся v1, у него предел на порядок выше."""
+    with patched(tts, FakeResponse(content=b"wav-bytes"), speechkit_api_version="v3",
+                 yandex_api_key="k", speechkit_api_key="sk", yandex_folder_id="f",
+                 speechkit_v3_max_chars=249, object_storage_bucket=None,
+                 media_dir=tempfile.mkdtemp()) as calls:
+        outcome = asyncio.run(
+            tts._synthesize_yandex(LONG_STORY, "alena", "wav", 1.0, "good", len(LONG_STORY))
+        )
+    assert [c["url"] for c in calls] == [tts.SPEECHKIT_V3_URL, tts.SPEECHKIT_URL]
+    assert outcome.fmt == "wav"
+
+
+def test_short_text_never_asks_for_unsafe_mode():
+    """Короткая реплика в предел влезает — опция с «возможной деградацией» ей не нужна."""
+    response = FakeResponse(text=v3_stream(b"audio", length_ms=800))
+    with patched(tts, response, speechkit_api_version="v3", yandex_api_key="k",
+                 speechkit_api_key="sk", yandex_folder_id="f", object_storage_bucket=None,
+                 media_dir=tempfile.mkdtemp()) as calls:
+        asyncio.run(tts._synthesize_yandex("Короткая подпись.", "alena", "mp3", 1.0, "good", 17))
+    assert "unsafeMode" not in calls[0]["json"]
+
+
+def test_slow_speech_shrinks_the_chunk():
+    """Второй предел — 24 секунды на фразу: на замедленной речи в него упирается более короткий текст."""
+    response = FakeResponse(text=v3_stream(b"audio", length_ms=1000))
+    with patched(tts, response, speechkit_api_version="v3", yandex_api_key="k",
+                 speechkit_api_key="sk", yandex_folder_id="f", speechkit_v3_max_chars=249,
+                 object_storage_bucket=None, media_dir=tempfile.mkdtemp()) as calls:
+        asyncio.run(tts._synthesize_yandex(LONG_STORY, "alena", "mp3", 0.5, "good", len(LONG_STORY)))
+    assert all(len(c["json"]["text"]) <= 124 for c in calls), [len(c["json"]["text"]) for c in calls]
+    assert len(calls) > len(tts.split_for_v3(LONG_STORY, 249)), "на медленной речи кусков больше"
+
+
+# ── 7. Причина провала синтеза видна в логах ────────────────────────────────
+class FailingResponse(FakeResponse):
+    """Ответ SpeechKit с ошибкой: raise_for_status бросает, как настоящий httpx."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        super().__init__(text=body)
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        import httpx as real_httpx
+
+        request = real_httpx.Request("POST", tts.SPEECHKIT_V3_URL)
+        raise real_httpx.HTTPStatusError(f"{self.status_code}", request=request, response=self)
+
+
+def test_synthesis_failure_writes_the_reason():
+    """502 наружу — одна фраза на все причины; в логе обязана быть настоящая.
+
+    Ровно этого не хватило на проде 02.09.2026: замер получил 36 отказов подряд,
+    а в логах функции про синтез не было ни строки.
+    """
+    with collected(tts.logger) as messages:
+        with patched(tts, FailingResponse(403, '{"error":"permission denied"}'),
+                     yandex_api_key="k", yandex_folder_id="f", speechkit_api_version="v3"):
+            try:
+                asyncio.run(tts._fetch_v3("текст", "alena", "mp3", 1.0, "good"))
+            except UpstreamError as exc:
+                assert "недоступен" in exc.message
+            else:
+                raise AssertionError("провал синтеза обязан оставаться UpstreamError")
+    line = next(m for m in messages if m.startswith("tts_failed"))
+    assert "api=v3" in line and "status=403" in line
+    assert "permission denied" in line, "в логе должно быть сообщение SpeechKit, иначе строка бесполезна"
+    assert "Api-Key" not in line and "k" not in line.split("detail=")[0], "ключ в лог не уходит"
+
+
+def test_empty_synthesis_still_warns_about_empty_answer():
+    """200 без аудио — отдельный случай, его строка была и остаётся."""
+    with collected(tts.logger) as messages:
+        with patched(tts, FakeResponse(text='{"result":{}}'),
+                     yandex_api_key="k", yandex_folder_id="f", speechkit_api_version="v3"):
+            try:
+                asyncio.run(tts._fetch_v3("текст", "alena", "mp3", 1.0, "good"))
+            except UpstreamError:
+                pass
+    assert any("пустой ответ" in m for m in messages)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

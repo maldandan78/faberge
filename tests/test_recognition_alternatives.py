@@ -22,11 +22,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import settings  # noqa: E402
 from app.services import recognizer  # noqa: E402
 
+# label_slug — как на проде: у ключевых яиц префикс и подчёркивания, у прочих —
+# slug страницы музея как есть.
 CATALOG = {
-    "Часы «Петушок»": "clock_rooster",
-    "Яйцо «Шантеклер»": "egg_chanticleer",
-    "Яйцо «Орден Святого Георгия»": "egg_george",
-    "Яйцо герцогини Мальборо": "egg_marlborough",
+    "Часы «Петушок»": "chasy-petushok",
+    "Яйцо «Шантеклер»": "yaytso-shanteklyer",
+    "Яйцо «Орден Святого Георгия»": "faberge_paskhalnoye_yaytso_orden_svyatogo_georgiya",
+    "Яйцо герцогини Мальборо": "faberge_yajczo_gerczogini_malboro",
 }
 KNOWN = list(CATALOG.values())
 
@@ -79,28 +81,28 @@ def _search(predictions, top_k=3):
 
 def test_ml_service_is_asked_with_headroom():
     """ML просим с запасом, а не ровно top_k — иначе дедуп съедает варианты."""
-    _, sent = _search([{"item_id": 1, "title": "Часы «Петушок»", "confidence": 0.93}], top_k=3)
+    _, sent = _search([{"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.93}], top_k=3)
     assert sent and int(sent[0]["limit"]) == settings.recognition_search_limit
     assert int(sent[0]["limit"]) > 3
 
 
 def test_top_k_is_respected_for_larger_requests():
     """Если попросили больше запаса — отдаём столько, сколько попросили."""
-    _, sent = _search([{"item_id": 1, "title": "Часы «Петушок»", "confidence": 0.93}], top_k=50)
+    _, sent = _search([{"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.93}], top_k=50)
     assert int(sent[0]["limit"]) == 50
 
 
 def test_recognized_answer_keeps_next_by_probability():
     """Уверенный ответ НЕ обрезает список: первым — найденный, дальше — варианты."""
     outcome, _ = _search([
-        {"item_id": 1, "title": "Часы «Петушок»", "confidence": 0.93},
-        {"item_id": 2, "title": "Яйцо «Шантеклер»", "confidence": 0.66},
-        {"item_id": 3, "title": "Яйцо «Орден Святого Георгия»", "confidence": 0.63},
+        {"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.93},
+        {"item_id": "2", "title_en": "yaytso-shanteklyer", "confidence": 0.66},
+        {"item_id": "3", "title_en": "paskhalnoye-yaytso-orden-svyatogo-georgiya", "confidence": 0.63},
     ], top_k=3)
     assert outcome.recognized is True
-    assert outcome.label_slug == "clock_rooster"
+    assert outcome.label_slug == "chasy-petushok"
     assert [slug for slug, _ in outcome.candidates] == [
-        "clock_rooster", "egg_chanticleer", "egg_george",
+        "chasy-petushok", "yaytso-shanteklyer", "faberge_paskhalnoye_yaytso_orden_svyatogo_georgiya",
     ]
     # Порядок — по убыванию уверенности, как их ранжировала модель.
     confidences = [conf for _, conf in outcome.candidates]
@@ -114,29 +116,48 @@ def test_duplicate_shots_of_one_item_do_not_eat_slots():
     limit=3 все три верхние строки оказывались одним и тем же яйцом.
     """
     outcome, _ = _search([
-        {"item_id": 1, "title": "Часы «Петушок»", "confidence": 0.93},
-        {"item_id": 2, "title": "часы петушок", "confidence": 0.91},     # тот же предмет
-        {"item_id": 3, "title": "Часы «Петушок».", "confidence": 0.88},  # и снова он
-        {"item_id": 4, "title": "Яйцо «Шантеклер»", "confidence": 0.66},
-        {"item_id": 5, "title": "Яйцо герцогини Мальборо", "confidence": 0.60},
+        {"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.93},
+        {"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.91},  # тот же предмет
+        {"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.88},  # и снова он
+        {"item_id": "4", "title_en": "yaytso-shanteklyer", "confidence": 0.66},
+        {"item_id": "5", "title_en": "yaytso-gertsogini-malboro", "confidence": 0.60},
     ], top_k=3)
     assert [slug for slug, _ in outcome.candidates] == [
-        "clock_rooster", "egg_chanticleer", "egg_marlborough",
+        "chasy-petushok", "yaytso-shanteklyer", "faberge_yajczo_gerczogini_malboro",
     ]
 
 
 def test_unmatched_titles_do_not_eat_slots():
-    """Название, не сшитое с каталогом, не занимает место живого варианта."""
+    """Предмет, не сшитый с каталогом, не занимает место живого варианта."""
+    outcome, _ = _search([
+        {"item_id": "1", "title_en": "chasy-petushok", "confidence": 0.93},
+        {"item_id": "2", "title_en": "avtomobil-russo-balt", "confidence": 0.70},
+        {"item_id": "3", "title_en": "yaytso-shanteklyer", "confidence": 0.66},
+        {"item_id": "4", "title_en": "yaytso-gertsogini-malboro", "confidence": 0.60},
+    ], top_k=3)
+    assert [slug for slug, _ in outcome.candidates] == [
+        "chasy-petushok", "yaytso-shanteklyer", "faberge_yajczo_gerczogini_malboro",
+    ]
+    # Русского названия в контракте 1.0.0 нет — добирать поиском по каталогу нечем.
+    assert outcome.unmatched == [("", 0.70)]
+
+
+def test_legacy_title_contract_still_matches():
+    """Сервис до 1.0.0 присылал title без title_en — сшивка по названию живёт как фолбэк."""
     outcome, _ = _search([
         {"item_id": 1, "title": "Часы «Петушок»", "confidence": 0.93},
         {"item_id": 2, "title": "Автомобиль Руссо-Балт", "confidence": 0.70},
-        {"item_id": 3, "title": "Яйцо «Шантеклер»", "confidence": 0.66},
-        {"item_id": 4, "title": "Яйцо герцогини Мальборо", "confidence": 0.60},
     ], top_k=3)
-    assert [slug for slug, _ in outcome.candidates] == [
-        "clock_rooster", "egg_chanticleer", "egg_marlborough",
-    ]
+    assert [slug for slug, _ in outcome.candidates] == ["chasy-petushok"]
     assert outcome.unmatched == [("Автомобиль Руссо-Балт", 0.70)]
+
+
+def test_ml_item_id_is_not_our_id():
+    """item_id — внутренний id ML-сервиса: совпадение с нашим slug'ом ничего не значит."""
+    outcome, _ = _search([
+        {"item_id": "chasy-petushok", "title_en": "avtomobil-russo-balt", "confidence": 0.93},
+    ], top_k=3)
+    assert outcome.candidates == []
 
 
 def test_stub_also_returns_alternatives_when_recognized():
