@@ -64,8 +64,9 @@ async def recognize_exhibit(
         raise HTTPException(status_code=413, detail=_too_large_detail(len(data)))
 
     known = await crud.all_label_slugs(session)
-    # Реальный ML-сервис возвращает названия (title); карта имя→slug нужна только
-    # в реал-режиме — в стабе лишний запрос не делаем.
+    # Реальный ML-сервис возвращает slug предмета (title_en) — его сшиваем с known.
+    # Карта имя→slug — фолбэк для старого контракта (title), нужна только в
+    # реал-режиме: в стабе лишний запрос не делаем.
     name_to_slug = await crud.slug_by_name(session) if settings.yolo_configured else {}
     t0 = time.monotonic()
     try:

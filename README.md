@@ -236,7 +236,7 @@ app/
     telemetry.py         POST /telemetry/events
   services/
     __init__.py          UpstreamError
-    recognizer.py        ML-поиск по фото + сшивка title → label_slug (нормализация, нечёткое сравнение)
+    recognizer.py        ML-поиск по фото + сшивка title_en → label_slug (канонический ключ, нечёткое сравнение)
     llm.py               YandexGPT: рассказ, ответ в диалоге, вопросы-подсказки, числа прописью; промпты; стабы
     tts.py               SpeechKit v1/v3, роли голосов, ключ аудио-кэша, стаб WAV
     storage.py           Object Storage (boto3) или локальный media/; безопасное удаление только «своих» URL
@@ -459,20 +459,31 @@ erDiagram
    дважды: сначала по `file.size` до чтения, потом по `len(data)` (413 с
    фактическим размером в тексте). Пустой файл — 400.
 2. **Внешний ML-сервис.** `POST {YOLO_ENDPOINT}` без авторизации, multipart
-   `{file, limit}`, ответ `{"predictions":[{item_id,title,confidence}],"found"}`.
+   `{file, limit}`, ответ `{"predictions":[{item_id,title_en,confidence}],"found"}`
+   (Faberge Search API 1.0.0). `title_en` — slug страницы предмета на сайте
+   музея, `item_id` — внутренний id сервиса, с нашими id не связан.
    `limit = max(top_k, 10)`: индекс ключуется по фото, и несколько ракурсов одного
    предмета нужно схлопнуть. Таймаут — `RECOGNITION_TIMEOUT_SEC` (25 с).
-3. **Сшивка `title → label_slug`** (`recognizer.match_title`). ML-сервис знает
-   предметы по названию, каталог — по слагу. Названия нормализуются (NFKC,
-   кавычки, ё→е, пробелы, casefold) и сравниваются:
-   - сначала точно;
-   - затем нечётко (`difflib`, порог `RECOGNITION_NAME_MATCH_CUTOFF=0.86`);
-   - затем по `item_id`, если это уже известный слаг.
+3. **Сшивка `title_en → label_slug`** (`recognizer.match_slug`). Slug музея и наш
+   `label_slug` совпадают не всегда: у ключевых яиц префикс и подчёркивания
+   (`faberge_paskhalnoye_yaytso_landyshi`), часть заведена другим транслитом
+   (`pasxalnoe_yajczo` ↔ `paskhalnoe-yaytso`), длинные обрезаны до 100 знаков с
+   хвостом-хэшем (`load_faberge.clamp_slug`). Поэтому сравнение идёт так:
+   - сначала точно, в том числе после той же обрезки до 100 знаков;
+   - затем по каноническому ключу (`normalize_slug`): регистр, `_`/`-`, префикс
+     `faberge_`, варианты транслита (`kh/x`, `cz/tz/ts`, `j/y`, `-yi/-y`);
+   - затем нечётко (`difflib`, порог `RECOGNITION_SLUG_MATCH_CUTOFF=0.9`), но
+     только если совпадают первое слово (тип предмета) и числа: `blyudo-s-monogrammami-…`
+     и `byuvar-s-monogrammami-…` — разные предметы, `chasy-2` и `chasy-3` тоже.
 
-   Несшитые предсказания пишутся в лог на уровне `WARNING`, сырой ответ
-   сервиса — на уровне `INFO`.
-4. **Добор кандидатов.** Если не сшилось ничего, названия от модели идут в
-   полнотекстовый поиск, и фронт показывает «возможно, это» вместо ошибки.
+   Если сервис прислал `title` (контракт до 1.0.0), работает прежняя сшивка по
+   названию (`recognizer.match_title`: NFKC, кавычки, ё→е, пробелы, casefold;
+   нечётко — порог `RECOGNITION_NAME_MATCH_CUTOFF=0.86`). Несшитые предсказания
+   пишутся в лог на уровне `WARNING` (с `title_en`, `title`, `item_id`), сырой
+   ответ сервиса — на уровне `INFO`.
+4. **Добор кандидатов.** Если не сшилось ничего и сервис прислал русские
+   названия, они идут в полнотекстовый поиск, и фронт показывает «возможно,
+   это» вместо ошибки. По контракту 1.0.0 названий нет — добора тоже нет.
 5. **Ответ** `{recognized, label_slug, confidence, exhibit, candidates, request_id, processing_ms}`.
    `recognized = true`, только если уверенность ≥ `RECOGNITION_CONFIDENCE_THRESHOLD`
    (0.6) **и** экспонат нашёлся в БД.
@@ -483,8 +494,10 @@ erDiagram
 
 - **Карточка без `label_slug` распознаванием не возвращается вообще.** Значит, доля
   карточек со слагом — верхняя граница покрытия.
-- **Имена в каталоге не уникальны** (например, 12 «Портсигаров»). Побеждает
-  наименьший id, так что вторая одноимённая карточка не распознаётся никогда.
+- **Имена в каталоге не уникальны** (например, 12 «Портсигаров»). Для сшивки по
+  `title` (старый контракт) побеждает наименьший id, так что вторая одноимённая
+  карточка так не распознаётся никогда. Сшивку по `title_en` это не касается:
+  slug уникален.
 
 Оба эффекта меряет читающий скрипт, админ-токен ему не нужен:
 
@@ -853,7 +866,7 @@ docstring `scripts/analytics_cron/index.py`.
 | Залы | `HALL_DESCRIPTION_PREVIEW_CHARS` (350; ≤0 отключает превью) |
 | Yandex | `YANDEX_API_KEY`, `YANDEX_FOLDER_ID`, `YANDEXGPT_MODEL_URI`, `YANDEXGPT_LITE_MODEL_URI`, `SPEECHKIT_API_KEY`, `YOLO_ENDPOINT` |
 | Object Storage | `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_ENDPOINT` (`https://storage.yandexcloud.net`), `OBJECT_STORAGE_PUBLIC_BASE`; ключи — `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (читаются напрямую из `os.environ`) |
-| Распознавание | `RECOGNITION_CONFIDENCE_THRESHOLD` (0.6), `RECOGNITION_TIMEOUT_SEC` (25), `RECOGNITION_NAME_MATCH_CUTOFF` (0.86; 0 отключает нечёткое сравнение), `RECOGNITION_SEARCH_LIMIT` (10) |
+| Распознавание | `RECOGNITION_CONFIDENCE_THRESHOLD` (0.6), `RECOGNITION_TIMEOUT_SEC` (25), `RECOGNITION_SLUG_MATCH_CUTOFF` (0.9), `RECOGNITION_NAME_MATCH_CUTOFF` (0.86, только для старого контракта с `title`); 0 отключает нечёткое сравнение; `RECOGNITION_SEARCH_LIMIT` (10) |
 | TTS | `SPEECHKIT_API_VERSION` (`v3`), `SPEECHKIT_V3_MAX_CHARS` (249), `TTS_SPOKEN_VIA_LLM` (true) |
 | Гид: расход | `GUIDE_HISTORY_TURNS` (3), `GUIDE_GROUNDING_MAX_CHARS` (700), `GUIDE_STORY_MAX_CHARS` (900), `GUIDE_STORY_MAX_TOKENS` (500), `LLM_LOG_USAGE` (true) |
 | Гид: подсказки | `GUIDE_QUESTIONS_CACHE_ENABLED` (true), `GUIDE_QUESTIONS_CACHE_SIZE` (8), `GUIDE_QUESTIONS_FILTER`, `GUIDE_QUESTIONS_GROUNDED`, `GUIDE_QUESTIONS_DEDUPE` (все true) |
